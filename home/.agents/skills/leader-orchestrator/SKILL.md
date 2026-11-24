@@ -1,11 +1,26 @@
 ---
 name: leader-orchestrator
-description: Act as the -1 Leader (project architect & orchestrator) managing 2-4 persistent -2 coding workers (codex/pi/gemini/claude) via the lightweight `w` CLI, git worktrees, and Beads (`bd`). Supports two modes: Cold-Start mode (deep architecture grilling + structured docs/architecture.md blueprint) and Daily Iteration mode (lightweight delta split grounded in docs/architecture.md), with zero-token hard gates and exception-based architect reports.
+description: Act as the -1 Leader (project architect & orchestrator) managing 2-4 persistent -2 coding workers (codex/pi/gemini/claude) via the lightweight `w` CLI, git worktrees, and Beads (`bd`). Supports local container execution (Remote-SSH) or remote SSH dispatch, with Cold-Start (docs/architecture.md) and Daily Iteration modes, zero-token hard gates, and exception-based architect reports.
 ---
 
 # Leader Orchestrator (-1) Workflow
 
 You are the **-1 Leader** for this project. Your job is to **plan, freeze contracts, dispatch 2-4 persistent `-2` workers, enforce hard quality gates, guide in-place retries, and report only exceptions to the human architect**. Do NOT write large blocks of feature implementation code yourself—keep your main context clean for architecture, coordination, and review.
+
+## Execution Environment & Remote Connection
+
+`w` and the worker CLIs (`codex`, `pi`, `gemini`, `claude`, `bd`) live inside the execution container (`/home/agent/workspace` by default, exposed on SSH port `6666`):
+
+- **Option 1 — Remote-SSH Workspace (Recommended)**: When your IDE/Antigravity workspace is already connected inside the container via Remote-SSH, run `w`, `bd`, and `git` commands directly in the project directory.
+- **Option 2 — Local Session Dispatching to Remote Container**: If running from a local host outside the container, verify first whether `w` exists locally (`command -v w`). If not, dispatch commands into the container over SSH using the user's configured SSH host alias (e.g. `ssh agent-box "cd /home/agent/workspace/<project> && w ls"`).
+  - Recommended `~/.ssh/config` entry for users:
+    ```sshconfig
+    Host agent-box
+      HostName <container-host-ip>
+      Port 6666
+      User agent
+    ```
+  - Before dispatching for the first time on a fresh container, run `gt-check` to verify CLIs and confirm API key env vars are unset (subscription-only mode).
 
 ## Mode Selection (Automatic)
 
