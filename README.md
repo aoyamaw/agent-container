@@ -1,112 +1,205 @@
-# Agent Container
+# Agent Container（多 Agent 第三阶段执行容器）
 
-一个面向 AI Coding Agent 的通用开发容器镜像。项目基于 Debian Trixie Slim，预装常用开发工具，并提供非 root 用户、SSH 服务、目录挂载和国内网络配置。
+一个面向 **AI Coding Agent 并发研发（第三阶段：Leader + 持久化 Worker）** 的开箱即用容器环境。基于 `debian:trixie-slim` 与 Rootless Podman 构建，将所有并发 Agent 隔离在独立沙箱中运行，彻底与本地开发环境脱钩。
+
+---
 
 ## 环境概览
 
 | 项目 | 配置 |
 | --- | --- |
 | 基础镜像 | `debian:trixie-slim` |
-| 默认用户 | `agent`（UID `1000`） |
+| 默认用户 | `agent`（UID `1000`，支持免密 `sudo`） |
 | 工作目录 | `/home/agent/workspace` |
-| 开发工具 | Git、curl、jq、Python 3、pip、venv、fnm、固定版本 Node.js、pnpm、Codex、Pi Agent、build-essential |
-| 远程访问 | OpenSSH Server，默认宿主机端口 `6666` 映射到容器端口 `22` |
-| 提权方式 | `agent` 用户可免密使用 `sudo` |
-| 默认 APT 源 | 清华大学镜像源，可通过构建参数关闭 |
-| 默认 npm 源 | `https://registry.npmmirror.com`，可通过构建参数关闭 |
+| Coding Agent CLIs | **Codex CLI**、**Pi Coding Agent**、**Claude Code**、**Gemini CLI** |
+| 轻量编排层（默认推荐） | **`w`**（零依赖持久化 Worker 编排 CLI）+ **`bd`（Beads 任务账本）** + `leader-orchestrator` Skill |
+| 重型编排层（大并发备用） | **Gas Town (`gt`)** + **Dolt** + **tmux** |
+| 基础开发工具 | Git、ripgrep、jq、tmux、sqlite3、Python 3、fnm、Node.js、pnpm、Go、bubblewrap、build-essential |
+| 远程访问 | OpenSSH Server，默认宿主机端口 **`6666`** 映射到容器 `22` |
+| 国内镜像优化 | APT 清华源、DaoCloud 基础镜像、npmmirror（Node 二进制 + npm/pnpm）、阿里云 Go 镜像 + `goproxy.cn`（构建期尽量不消耗代理流量） |
 
-## 前置要求
+---
 
-推荐使用 Podman 及其 Compose 支持：
+## 前置要求（Linux / Debian 推荐）
+
+推荐使用 **Rootless Podman** + **`podman-compose`**：
 
 ```bash
-# 查看 Podman 和 Compose 版本
-podman --version
-podman compose version
+# Debian 安装示例
+sudo apt-get update
+sudo apt-get install -y podman podman-compose uidmap slirp4netns fuse-overlayfs
 
-# 查看容器状态和日志
-podman compose ps
-podman compose logs -f
-
-# 停止并删除当前项目的容器和网络
-podman compose down
+# 开启 systemd linger，确保断开 SSH 后 Rootless 容器 7×24 持续保活
+sudo loginctl enable-linger "$USER"
 ```
 
-更多用法请参考 [Podman 文档](https://docs.podman.io/) 和 [podman-compose 文档](https://github.com/containers/podman-compose)。
+---
 
-`compose.yaml` 使用了 Podman 的 `userns_mode: keep-id`，以便在 Rootless 模式下让容器内进程正确访问宿主机挂载的文件。镜像本身也可以使用 Docker 构建，但 Docker Compose 可能不支持该配置项。
+## 快速开始
 
-## 快速开始（国内环境）
-
-克隆项目：
+### 1. 克隆项目并拉取基础镜像
 
 ```bash
-git clone https://github.com/LingMessy/agent-container.git
+git clone -b feat/gastown https://github.com/aoyamaw/agent-container.git
 cd agent-container
-```
 
-为避免当前终端中残留的旧代理配置干扰后续拉取和构建，建议先运行一次：
-
-```bash
-source ./home/unset-proxy.sh
-```
-
-使用国内镜像拉取基础镜像：
-
-```bash
+# 使用国内镜像拉取 debian:trixie-slim（如海外直连可跳过）
 chmod +x ./pull.sh && ./pull.sh
 ```
 
-配置 SSH 端口和 fnm/Node.js 下载代理，然后构建并启动容器：
+### 2. 配置宿主机目录与代理（按需修改）
+
+默认代理配置在 `compose.yaml` 中为 `192.168.3.110:7890`（仅用于构建期少量外网资源及容器运行时访问 AI 服务，APT / Node / npm / Go 均优先走国内直连镜像）。
+
+使用前请先在宿主机创建工作目录，并按你自己的网络环境调整 `compose.yaml` 里的 `PROXY_IP` / `PROXY_PORT`（如果服务器可直连外网，可将 `USE_PROXY` 与 `RUNTIME_PROXY` 设为 `"false"`）：
 
 ```bash
-# 设置 SSH 端口
-export SSH_PORT=6667
-
-# 设置代理
-export USE_PROXY=true
-export PROXY_IP=192.168.3.110
-export PROXY_PORT=7890
-
-# 构建镜像并启动容器
-podman compose up --build -d
+mkdir -p ./workspace
 ```
 
-当前项目目录会挂载到容器内的 `/home/agent/workspace`。可通过 `WORKSPACE_DIRD` 修改容器内的挂载位置和工作目录。
+### 3. 构建并后台启动容器
 
-## 支持变量
+> **注意**：`podman-compose` 默认会创建 pod，与 `userns_mode: "keep-id"` 冲突，启动时请加上 `--in-pod=0`：
 
-可配置变量如下；Compose 支持通过同名宿主机环境变量或项目 `.env` 文件设置：
+```bash
+# 使用默认 ./workspace 目录启动
+podman-compose --in-pod=0 up --build -d
 
-| 参数 | 默认值 | 用途 |
+# 或挂载宿主机任意指定代码目录
+WORKSPACE_HOST_DIR=/path/to/your/workspace podman-compose --in-pod=0 up --build -d
+```
+
+### 4. 一键自检工具链与订阅隔离状态
+
+```bash
+podman exec -it agent-container-0.2.0-gastown bash -lc "gt-check"
+```
+
+`gt-check` 会检查所有核心工具链、4 大 Agent CLI 版本，并确认 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` 均未设置（避免意外走按量付费 API 覆盖订阅登录态）。
+
+### 5. SSH 登录与首次订阅认证
+
+默认凭据：用户名 `agent`，密码 `agent123`（**对外或公网环境请务必修改密码或改用 SSH 公钥**）。
+
+```bash
+# 本地连接容器（如需浏览器 OAuth 本地回调，按需加上 -L 端口转发）
+ssh -p 6666 -L 1455:127.0.0.1:1455 agent@<服务器IP>
+
+# 在容器内完成各 CLI 订阅登录（凭证保存在 Named Volume 中，重建镜像免重登）
+codex login
+gemini
+# 如需使用 Claude Code 原生二进制，首次可执行：
+# curl -fsSL https://claude.ai/install.sh | bash && claude
+```
+
+---
+
+## 推荐工作流：个人 / 小团队“轻第三阶段”架构
+
+本容器同时内置了**零编排税的轻量组合（默认推荐，适合 2~5 个并发）**与**重型工厂 Gas Town（8~20 个并发备用）**。
+
+核心哲学：**人看不过来海量并发代码，只把控「事前技术路线与契约」+「事后例外简报」。**
+
+### 双模式设计（已内置为 `leader-orchestrator` Skill）
+
+1. **冷启动 / 大型重构（完整打磨模式）**
+   - 用反重力（`-1`）Remote-SSH 连进容器（`agent@<服务器IP>:6666`），打开 `/home/agent/workspace/<项目>`。
+   - 结合 `/grill-me`（深度拷问边界与假设）或 BMAD `/pm` + `/architect`（工程蓝图防漏项），共同打磨并冻结 **`docs/architecture.md`**（目录树、模块边界、数据模型、公共契约、红线、验收命令）。
+   - **冻结后停掉重型规划流程**，把 `docs/architecture.md` 和公共接口定义提交到主分支。
+
+2. **日常功能迭代（轻量增量模式）**
+   - `-1` 直接读取 `docs/architecture.md` 作为项目宪法，花 2 分钟给出本次 2~4 个 Worker 的任务切分表（每个任务明确 `--allow` 允许改动路径和 `--verify` 验收命令）。
+   - 用 `bd`（Beads）记录任务依赖，防 5 小时订阅限频断线丢进度。
+   - `-1` 通过内置 **`w`** CLI 并发拉起持久化 `-2`（可跨 `codex` / `pi` / `gemini` / `claude` 分摊各家 5 小时订阅额度）。
+   - `-2` 跑完后自动跑 **0 Token 硬门禁（`w check`）**——越界改文件或测试失败时，`-1` 直接 `w send` 在原上下文中要求返工，**绝不次抛重开**。
+   - 全部通过后运行 **`w report --run-check`** 生成一屏**架构师例外简报**（合规全绿项折叠，只高亮越界、改依赖/契约、失败或限频项），你确认后一键 `w merge`。
+
+### 轻量编排工具 `w` 常用命令速查
+
+```bash
+# 1. 创建独立 git worktree 并后台拉起持久化 Worker
+w spawn core-impl -b codex \
+  --allow "src/core/" \
+  --verify "pnpm test -- core" \
+  -p "严格遵守 docs/architecture.md，实现核心模块并提交代码。"
+
+# 2. 查看所有并发 Worker 状态、轮次、改动文件与越界数
+w ls
+
+# 3. 等待任意一个（或全部）Worker 完成本轮
+w wait --any
+
+# 4. 查看 Worker 最新回复摘要或原始日志
+w logs core-impl --last
+w logs core-impl --tail 80
+
+# 5. 运行 0 Token 硬门禁（路径越界检测 + 敏感/契约文件告警 + verify 命令）
+w check core-impl
+
+# 6. 原地续聊纠偏（保留完整会话上下文，不重建）
+w send core-impl "测试报错 xxx，请只在 src/core/ 内修复后重跑验证。"
+
+# 7. 生成一屏架构师例外简报
+w report --run-check
+
+# 8. 终审通过后合并回当前主分支并清理 worktree/分支
+w merge core-impl --auto-commit --delete
+
+# 9. 放弃并清理某个 Worker
+w rm core-impl --force
+```
+
+### 未来升级到大并发（8~20 个 Agent）
+
+当项目并发规模扩大到需要自动看门狗与合并队列时，容器内已预装 `dolt`、`bd` 与 `gt`（Gas Town），可直接在已有 Beads 账本上平滑启用：
+
+```bash
+bd init
+gt up
+```
+
+---
+
+## 持久化卷与容器数据说明
+
+`compose.yaml` 将**业务代码**与**状态/缓存**解耦：
+- **业务代码（Bind Mount）**：`${WORKSPACE_HOST_DIR:-./workspace}` → `/home/agent/workspace`
+- **持久化 Named Volumes**（重建/升级镜像不丢失）：
+  - `agent-codex` → `/home/agent/.codex`
+  - `agent-claude` → `/home/agent/.claude`
+  - `agent-gemini` → `/home/agent/.gemini`
+  - `agent-pi` → `/home/agent/.pi`
+  - `agent-gastown` → `/home/agent/gt`
+  - `agent-pnpm-store` → `/home/agent/.local/share/pnpm/store`（并发 worktree 共享依赖缓存）
+
+---
+
+## 主要配置项
+
+| 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
-| `USE_PROXY` | `true` | 仅在安装 fnm 和 Node.js 时加载代理 |
-| `PROXY_IP` | `192.168.3.110` | 代理主机地址 |
-| `PROXY_PORT` | `7890` | 代理端口 |
-| `PROXY_USER` | 空 | 代理用户名 |
-| `PROXY_PASS` | 空 | 代理密码，与用户名同时设置时启用认证 |
-| `USE_CHINA_NPM_MIRROR` | `true` | 使用 `https://registry.npmmirror.com` 配置 npm、Corepack 和 pnpm |
-| `USE_CHINA_APT_MIRROR` | `true` | 使用清华大学 Debian APT 镜像源 |
-| `WORKSPACE_DIRD` | `/home/agent/workspace` | 容器内的项目挂载位置和工作目录，并作为运行时环境变量暴露 |
+| `WORKSPACE_HOST_DIR` | `./workspace` | 宿主机挂载到容器 `/home/agent/workspace` 的代码目录 |
+| `PROXY_IP` / `PROXY_PORT` | `192.168.3.110` / `7890` | 代理地址（可在 `compose.yaml` 中按自身环境修改） |
+| `USE_PROXY` / `RUNTIME_PROXY` | `true` / `true` | 构建期 / 运行期是否启用代理（`NO_PROXY` 自动放行本地与私有网段） |
+| `USE_CHINA_APT_MIRROR` | `true` | 使用清华大学 Debian APT 源 |
+| `USE_CHINA_NPM_MIRROR` | `true` | Node 二进制、npm、Corepack、pnpm 走 `npmmirror` |
+| `USE_CHINA_GO_PROXY` | `true` | Go 二进制走阿里云镜像，Go 模块走 `goproxy.cn` |
+| 宿主机 SSH 端口 | `6666` | 在 `compose.yaml` 的 `ports` 中修改 |
+| 资源限制 | `12g` 内存 / `6` CPU | 防止并发编译或 Agent 失控拖垮宿主机 |
 
-## SSH 连接
-
-```bash
-ssh agent@localhost -p 6667
-```
-
-默认凭据：
-
-- 用户名：`agent`
-- 密码：`agent123`
+---
 
 ## 项目结构
 
 ```text
 .
-├── Containerfile    # 镜像构建定义
-├── compose.yaml     # 本地开发容器编排配置
-├── pull.sh          # 用于通过国内镜像拉取基础镜像的脚本
-├── home/            # 构建时复制到 /home/agent 的外部工具和脚本
-└── bashrc.sh        # 构建时追加到 agent 用户 .bashrc
+├── Containerfile                                   # 镜像构建定义
+├── compose.yaml                                    # Podman Compose 编排与持久化卷配置
+├── pull.sh                                         # 国内镜像拉取基础镜像脚本
+├── bashrc.sh                                       # 容器 Shell 环境、自动代理与 gt-check 自检
+└── home/                                           # 构建期复制到 /home/agent/
+    ├── set-proxy.sh / unset-proxy.sh               # 代理开关脚本
+    ├── .local/bin/w                                # 零依赖持久化 Worker 编排 CLI
+    ├── .local/share/templates/DESIGN.md            # 增量任务切分模板
+    └── .agents/skills/leader-orchestrator/SKILL.md # 反重力 -1 Leader 工作流 Skill
 ```

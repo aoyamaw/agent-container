@@ -41,7 +41,7 @@ services:
 
     volumes:
       # 业务代码工作区（宿主机目录直挂，方便 Remote-SSH 与 Git 管理）
-      - /home/agent-aoyama/workspace:/home/agent/workspace:Z
+      - ${WORKSPACE_HOST_DIR:-./workspace}:/home/agent/workspace:Z
       # 各 CLI 订阅登录态与 Gas Town 状态持久化（重建镜像免重登）
       - agent-codex:/home/agent/.codex
       - agent-claude:/home/agent/.claude

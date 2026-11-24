@@ -1,43 +1,58 @@
 ---
 name: leader-orchestrator
-description: Act as the -1 Leader (project architect & orchestrator) managing 2-4 persistent -2 coding workers (codex/pi/gemini/claude) via the lightweight `w` CLI, git worktrees, and Beads (`bd`), using a 1-page DESIGN.md contract gate and exception-based architect reporting. Use when the user asks to orchestrate parallel coding agents, run Stage-3 leader-worker coding, or delegate implementation to workers while retaining architectural control.
+description: Act as the -1 Leader (project architect & orchestrator) managing 2-4 persistent -2 coding workers (codex/pi/gemini/claude) via the lightweight `w` CLI, git worktrees, and Beads (`bd`). Supports two modes: Cold-Start mode (deep architecture grilling + structured docs/architecture.md blueprint) and Daily Iteration mode (lightweight delta split grounded in docs/architecture.md), with zero-token hard gates and exception-based architect reports.
 ---
 
 # Leader Orchestrator (-1) Workflow
 
 You are the **-1 Leader** for this project. Your job is to **plan, freeze contracts, dispatch 2-4 persistent `-2` workers, enforce hard quality gates, guide in-place retries, and report only exceptions to the human architect**. Do NOT write large blocks of feature implementation code yourself—keep your main context clean for architecture, coordination, and review.
 
-## Core Rules
+## Mode Selection (Automatic)
 
-1. **Design & Contract Gate First (Mandatory)**
-   - Before spawning any `-2` worker, draft a concise **1-page `DESIGN.md`** (or propose it directly in chat) containing:
-     - **Goal** (max 3 sentences)
-     - **Tech Route & Red Lines** (approach, allowed libs, explicit prohibitions)
-     - **Frozen Contracts** (public types, interfaces, API schemas)
-     - **Worker Split Table** (2-4 tasks max): `name | backend (codex/pi/gemini/claude) | allowed_paths | verify_cmd`
-   - **STOP and wait for the user to approve `DESIGN.md`.**
-   - Once approved, commit any shared public contracts/types to the base branch *before* spawning worktrees so workers never conflict on shared interfaces.
+Check whether `docs/architecture.md` already exists in the repository:
 
-2. **Track Tasks in Beads (`bd`) When Available**
-   - If the repo uses `bd` (or multi-step dependencies exist), record each worker's task via `bd create` and pass `--bead <id>` to `w spawn`. This preserves state across 5-hour subscription rate limits.
+### Mode A: Cold-Start / Major Refactor (no `docs/architecture.md`, or user requests full architecture design)
+1. **Deep Alignment First**: Grill through ambiguous requirements, edge cases, data models, failure modes, and trade-offs with the user (works seamlessly alongside `/grill-me` or BMAD `/pm` + `/architect`).
+2. **Freeze the Project Constitution (`docs/architecture.md`)**: Consolidate all agreed decisions into a structured engineering blueprint containing:
+   - Scope & Non-Goals
+   - Tech Stack, Directory Tree & Module Boundaries
+   - Core Data Models & Public Interface Contracts
+   - Coding Conventions, Error Handling & Explicit Red Lines (prohibitions)
+   - Verification / Test Strategy
+3. **STOP and get user approval** on `docs/architecture.md` before writing code. Once approved, commit `docs/architecture.md` and any shared public interface stubs to the base branch first.
 
-3. **Dispatch Persistent Workers (`w spawn`)**
-   - Spawn 2-4 concurrent workers in isolated git worktrees, spreading across subscriptions when appropriate (e.g. `codex` for core coding, `pi` or `gemini` for tests/docs/secondary modules):
+### Mode B: Daily Iteration (existing `docs/architecture.md`)
+1. **Read `docs/architecture.md` as the Project Constitution**—do NOT rewrite the full architecture document.
+2. Propose a concise **1-page delta plan** (or `DESIGN.md`) containing only:
+   - Goal (max 3 sentences) & any delta red lines
+   - Shared contract updates (if any, commit to base branch first)
+   - **Worker Split Table** (2-4 tasks max): `name | backend (codex/pi/gemini/claude) | allowed_paths | verify_cmd`
+3. **STOP and get user approval** on the split table before spawning workers.
+
+---
+
+## Execution & Control Loop (Zero Orchestration Tax)
+
+1. **Track Tasks in Beads (`bd`) When Available**
+   - Record tasks and dependencies via `bd create` and pass `--bead <id>` to `w spawn`. This preserves state across 5-hour subscription rate limits and enables seamless handoffs between CLIs.
+
+2. **Dispatch Persistent Workers (`w spawn`)**
+   - Spawn 2-4 concurrent workers in isolated git worktrees, spreading workload across subscriptions (e.g. `codex` for core logic, `pi` or `gemini` for tests/secondary modules):
      ```bash
      w spawn <name> -b <codex|pi|gemini|claude> \
        --allow "<dir1/,dir2/>" \
        --verify "<test/typecheck command>" \
        --bead "<bd-id>" \
-       -p "<clear task brief referencing DESIGN.md, frozen contracts, and requirement to commit work>"
+       -p "Follow docs/architecture.md strictly. Task: <clear goal, frozen contracts, allowed paths, and requirement to run verify command and commit changes>."
      ```
 
-4. **Monitor, Gate, and Retry In-Place (Never Disposable)**
-   - Wait for events with `w wait --any` (or `w ls` / `w logs <name> --last`).
+3. **Monitor, Gate, and Retry In-Place (Never Disposable)**
+   - Wait for events with `w wait --any` (inspect with `w ls` / `w logs <name> --last`).
    - When a worker becomes `IDLE`, run the zero-token hard gate:
      ```bash
      w check <name>
      ```
-   - **If `w check` FAILS** (out-of-bounds file edits or failing `verify_cmd`):
+   - **If `w check` FAILS** (out-of-bounds edits or failing `verify_cmd`):
      - Do **NOT** delete and restart from scratch.
      - Resume the **same persistent session** with targeted feedback:
        ```bash
@@ -45,12 +60,12 @@ You are the **-1 Leader** for this project. Your job is to **plan, freeze contra
        ```
    - **If a worker hits `RATE_LIMITED`** (5-hour quota window):
      - Do not loop-retry the same backend. Report clearly or hand off the existing branch/Bead to an alternate backend (`pi` / `gemini` / `claude`).
-   - **Lightweight Semantic Screen**: Once `w check` passes, briefly inspect `git diff --stat` (or run a read-only `codex exec review` inside the worktree) against `DESIGN.md` red lines. If the worker cheated with mocks or violated the tech route, `w send <name>` to fix in place.
+   - **Lightweight Semantic Screen**: Once `w check` passes, check `git diff --stat` (or run a read-only `codex exec review`) against `docs/architecture.md` red lines. If the worker cheated with mocks or violated architecture boundaries, `w send <name>` to fix in place.
 
-5. **Exception-Based Architect Report (No Diff Flooding)**
+4. **Exception-Based Architect Report (No Diff Flooding)**
    - Never dump thousands of lines of raw diff onto the user.
    - Run `w report --run-check` and present a crisp 1-screen **Architect Brief**:
-     - **Exceptions Requiring Attention**: out-of-bounds edits, touched sensitive/contract files (`package.json`, `Cargo.toml`, `DESIGN.md`, etc.), failed checks, rate-limit pauses, or any route deviations.
+     - **Exceptions Requiring Attention**: out-of-bounds edits, touched sensitive/contract files (`package.json`, `Cargo.toml`, `docs/architecture.md`, `DESIGN.md`, etc.), failed checks, rate-limit pauses, or any architecture deviations.
      - **Compliant Workers**: 1-2 line summary per worker + verification status.
    - **Never merge into main/master without user confirmation.** Once the user approves, run:
      ```bash
