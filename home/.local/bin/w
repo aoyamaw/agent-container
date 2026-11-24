@@ -2,7 +2,7 @@
 """
 w - Minimal persistent multi-agent worker orchestrator (zero-dependency stdlib).
 
-Manages persistent coding agent sessions (codex / pi / gemini / claude) in
+Manages persistent coding agent sessions (codex / pi / agy / claude) in
 isolated git worktrees with hard path-boundary checks, test gates, and
 exception-based architect reports.
 """
@@ -144,14 +144,12 @@ def build_agent_cmd(w: dict, prompt: str, is_resume: bool, last_msg_path: Path) 
         cmd.append(prompt)
         return cmd
 
-    if backend == "gemini":
-        cmd = ["gemini", "-p", prompt, "--yolo", "--skip-trust", "-o", "stream-json"]
+    if backend == "agy":
+        cmd = ["agy", "-p", prompt, "--mode", "auto", "--output-format", "stream-json"]
         if model:
-            cmd += ["-m", model]
-        if is_resume:
-            cmd += ["--resume", str(sid)]
-        else:
-            cmd += ["--session-id", str(sid)]
+            cmd += ["--model", model]
+        if is_resume and sid:
+            cmd += ["--conversation", str(sid)]
         return cmd
 
     if backend == "claude":
@@ -221,9 +219,9 @@ def extract_session_and_summary(backend: str, log_path: Path, last_msg_path: Pat
         except json.JSONDecodeError:
             continue
 
-        # Capture Codex thread/session ID
-        if backend == "codex" and not found_sid:
-            for k in ("thread_id", "session_id"):
+        # Capture Codex thread_id or AGY conversation_id
+        if backend in ("codex", "agy") and not found_sid:
+            for k in ("conversation_id", "conversationId", "thread_id", "session_id"):
                 if isinstance(obj.get(k), str) and obj[k]:
                     found_sid = obj[k]
                     break
@@ -403,7 +401,7 @@ def cmd_spawn(args: argparse.Namespace) -> None:
 
     if args.backend == "pi":
         session_id = str(base / "logs" / f"{name}.pi.jsonl")
-    elif args.backend in ("gemini", "claude"):
+    elif args.backend == "claude":
         session_id = str(uuid.uuid4())
     else:
         session_id = None  # codex assigns thread_id on first turn
@@ -724,7 +722,7 @@ def main() -> None:
 
     sp = sub.add_parser("spawn", help="Create worktree and spawn a persistent worker")
     sp.add_argument("name")
-    sp.add_argument("-b", "--backend", choices=["codex", "pi", "gemini", "claude"], default="codex")
+    sp.add_argument("-b", "--backend", choices=["codex", "pi", "agy", "claude"], default="codex")
     sp.add_argument("-m", "--model", default=None)
     sp.add_argument("--allow", default="", help="Comma-separated allowed path prefixes/globs")
     sp.add_argument("--verify", default=None, help="Verification command to run in worktree")

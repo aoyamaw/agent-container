@@ -15,7 +15,6 @@ services:
         CODEX_VERSION: "0.154.0"
         PI_VERSION: "0.85.1"
         CLAUDE_CODE_VERSION: "latest"
-        GEMINI_CLI_VERSION: "latest"
         GO_VERSION: "1.26.0"
         BEADS_VERSION: "latest"
         GASTOWN_VERSION: "latest"

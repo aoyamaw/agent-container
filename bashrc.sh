@@ -46,7 +46,7 @@ function gt-check() {
     fi
   done
   echo "=== Coding Agent CLIs ==="
-  for cmd in codex pi claude gemini; do
+  for cmd in codex pi agy claude; do
     if command -v "$cmd" >/dev/null 2>&1; then
       printf "  %-8s: %s\n" "$cmd" "$("$cmd" --version 2>&1 | head -n 1)"
     else

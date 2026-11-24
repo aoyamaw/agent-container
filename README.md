@@ -11,7 +11,7 @@
 | 基础镜像 | `debian:trixie-slim` |
 | 默认用户 | `agent`（UID `1000`，支持免密 `sudo`） |
 | 工作目录 | `/home/agent/workspace` |
-| Coding Agent CLIs | **Codex CLI**、**Pi Coding Agent**、**Claude Code**、**Gemini CLI** |
+| Coding Agent CLIs | **Codex CLI**、**Pi Coding Agent**、**Claude Code**、**Antigravity CLI (`agy`)** |
 | 轻量编排层（默认推荐） | **`aw`**（零依赖持久化 Worker 编排 CLI）+ **`bd`（Beads 任务账本）** + `leader-orchestrator` Skill |
 | 重型编排层（大并发备用） | **Gas Town (`gt`)** + **Dolt** + **tmux** |
 | 基础开发工具 | Git、ripgrep、jq、tmux、sqlite3、Python 3、fnm、Node.js、pnpm、Go、bubblewrap、build-essential |
@@ -87,7 +87,7 @@ ssh -p 6666 -L 1455:127.0.0.1:1455 agent@<服务器IP>
 
 # 在容器内完成各 CLI 订阅登录（凭证保存在 Named Volume 中，重建镜像免重登）
 codex login
-gemini
+agy          # 无头 SSH 下会打印 Google 授权链接，浏览器打开后粘贴授权码即可
 # 如需使用 Claude Code 原生二进制，首次可执行：
 # curl -fsSL https://claude.ai/install.sh | bash && claude
 ```
@@ -110,7 +110,7 @@ gemini
 2. **日常功能迭代（轻量增量模式）**
    - `-1` 直接读取 `docs/architecture.md` 作为项目宪法，花 2 分钟给出本次 2~4 个 Worker 的任务切分表（每个任务明确 `--allow` 允许改动路径和 `--verify` 验收命令）。
    - 用 `bd`（Beads）记录任务依赖，防 5 小时订阅限频断线丢进度。
-   - `-1` 通过内置 **`aw`** CLI 并发拉起持久化 `-2`（可跨 `codex` / `pi` / `gemini` / `claude` 分摊各家 5 小时订阅额度）。
+   - `-1` 通过内置 **`aw`** CLI 并发拉起持久化 `-2`（可跨 `codex` / `pi` / `agy` / `claude` 分摊各家 5 小时订阅额度）。
    - `-2` 跑完后自动跑 **0 Token 硬门禁（`aw check`）**——越界改文件或测试失败时，`-1` 直接 `aw send` 在原上下文中要求返工，**绝不次抛重开**。
    - 全部通过后运行 **`aw report --run-check`** 生成一屏**架构师例外简报**（合规全绿项折叠，只高亮越界、改依赖/契约、失败或限频项），你确认后一键 `aw merge`。
 

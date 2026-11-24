@@ -3,7 +3,7 @@ FROM docker.io/library/debian:trixie-slim
 
 # OCI 标准元数据
 LABEL org.opencontainers.image.title="AI Agent Execution Environment (Gas Town)" \
-      org.opencontainers.image.description="Container environment tailored for multi-agent coding workloads with Gas Town, Beads, Dolt, Codex, Pi, Claude Code, and Gemini CLI" \
+      org.opencontainers.image.description="Container environment tailored for multi-agent coding workloads with Gas Town, Beads, Dolt, Codex, Pi, Claude Code, and Antigravity CLI (agy)" \
       org.opencontainers.image.vendor="Local Engine" \
       org.opencontainers.image.licenses="MIT"
 
@@ -138,16 +138,23 @@ RUN set -eu; \
 ARG CODEX_VERSION=0.154.0
 ARG PI_VERSION=0.85.1
 ARG CLAUDE_CODE_VERSION=latest
-ARG GEMINI_CLI_VERSION=latest
 
-# 安装主流 Coding Agent CLI（Codex / Pi / Claude Code / Gemini CLI）
+# 安装主流 Coding Agent CLI（Codex / Pi / Claude Code / Antigravity CLI (agy)）
 RUN set -eu; \
     eval "$(fnm env --shell bash)"; \
     pnpm install --global "@openai/codex@$CODEX_VERSION"; \
     pnpm add --global --ignore-scripts "@earendil-works/pi-coding-agent@$PI_VERSION"; \
-    pnpm install --global "@anthropic-ai/claude-code@$CLAUDE_CODE_VERSION"; \
-    pnpm install --global "@google/gemini-cli@$GEMINI_CLI_VERSION"
+    pnpm install --global "@anthropic-ai/claude-code@$CLAUDE_CODE_VERSION" \
 
+
+# 安装 Antigravity CLI (agy) 并创建全局软链（确保非交互 SSH 直接可用）
+RUN set -eu; \
+    if [ "$USE_PROXY" = "true" ]; then \
+        export PROXY_IP PROXY_PORT PROXY_USER PROXY_PASS; \
+        . "$HOME/set-proxy.sh"; \
+    fi; \
+    curl -fsSL https://antigravity.google/cli/install.sh | bash; \
+    sudo ln -sf /home/agent/.local/bin/agy /usr/local/bin/agy
 ARG GO_VERSION=1.26.0
 ARG USE_CHINA_GO_PROXY=true
 ARG BEADS_VERSION=latest
