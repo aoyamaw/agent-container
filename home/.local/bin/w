@@ -386,7 +386,7 @@ def cmd_spawn(args: argparse.Namespace) -> None:
     if not re.fullmatch(r"[a-zA-Z0-9._-]+", name):
         sys.exit("Error: worker name must match [a-zA-Z0-9._-]+")
     if worker_file(base, name).exists():
-        sys.exit(f"Error: worker '{name}' already exists. Use 'w send {name}' or 'w rm {name}'.")
+        sys.exit(f"Error: worker '{name}' already exists. Use 'aw send {name}' or 'aw rm {name}'.")
 
     base_branch = args.base or run_git(["rev-parse", "--abbrev-ref", "HEAD"], repo_root).stdout.strip()
     branch = f"agent/{name}"
@@ -486,7 +486,7 @@ def cmd_ls(args: argparse.Namespace) -> None:
         print(json.dumps(workers, indent=2, ensure_ascii=False))
         return
     if not workers:
-        print("No workers yet. Use 'w spawn <name> -b codex -p \"...\"' to start one.")
+        print("No workers yet. Use 'aw spawn <name> -b codex -p \"...\"' to start one.")
         return
 
     header = f"{'NAME':<14} {'BACKEND':<8} {'STATUS':<12} {'TURNS':<5} {'FILES':<5} {'VIOL':<4} {'BEAD':<10} {'BRANCH'}"
@@ -719,7 +719,7 @@ def cmd_rm(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(prog="w", description="Minimal persistent multi-agent worker orchestrator")
+    p = argparse.ArgumentParser(prog="aw", description="Minimal persistent multi-agent worker orchestrator")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sp = sub.add_parser("spawn", help="Create worktree and spawn a persistent worker")

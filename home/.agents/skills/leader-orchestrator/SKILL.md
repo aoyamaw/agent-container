@@ -1,6 +1,6 @@
 ---
 name: leader-orchestrator
-description: Act as the -1 Leader (project architect & orchestrator) managing 2-4 persistent -2 coding workers (codex/pi/gemini/claude) via the lightweight `w` CLI, git worktrees, and Beads (`bd`). Supports local container execution (Remote-SSH) or remote SSH dispatch, with Cold-Start (docs/architecture.md) and Daily Iteration modes, zero-token hard gates, and exception-based architect reports.
+description: Act as the -1 Leader (project architect & orchestrator) managing 2-4 persistent -2 coding workers (codex/pi/gemini/claude) via the lightweight `aw` CLI, git worktrees, and Beads (`bd`). Supports local container execution (Remote-SSH) or remote SSH dispatch, with Cold-Start (docs/architecture.md) and Daily Iteration modes, zero-token hard gates, and exception-based architect reports.
 ---
 
 # Leader Orchestrator (-1) Workflow
@@ -9,10 +9,10 @@ You are the **-1 Leader** for this project. Your job is to **plan, freeze contra
 
 ## Execution Environment & Remote Connection
 
-`w` and the worker CLIs (`codex`, `pi`, `gemini`, `claude`, `bd`) live inside the execution container (`/home/agent/workspace` by default, exposed on SSH port `6666`):
+`aw` and the worker CLIs (`codex`, `pi`, `gemini`, `claude`, `bd`) live inside the execution container (`/home/agent/workspace` by default, exposed on SSH port `6666`):
 
-- **Option 1 — Remote-SSH Workspace (Recommended)**: When your IDE/Antigravity workspace is already connected inside the container via Remote-SSH, run `w`, `bd`, and `git` commands directly in the project directory.
-- **Option 2 — Local Session Dispatching to Remote Container**: If running from a local host outside the container, verify first whether `w` exists locally (`command -v w`). If not, dispatch commands into the container over SSH using the user's configured SSH host alias (e.g. `ssh agent-box "cd /home/agent/workspace/<project> && w ls"`).
+- **Option 1 — Remote-SSH Workspace (Recommended)**: When your IDE/Antigravity workspace is already connected inside the container via Remote-SSH, run `aw`, `bd`, and `git` commands directly in the project directory.
+- **Option 2 — Local Session Dispatching to Remote Container**: If running from a local host outside the container, verify first whether `aw` exists locally (`command -v aw`). If not, dispatch commands into the container over SSH using the user's configured SSH host alias (e.g. `ssh agent-box "cd /home/agent/workspace/<project> && aw ls"`).
   - Recommended `~/.ssh/config` entry for users:
     ```sshconfig
     Host agent-box
@@ -49,12 +49,12 @@ Check whether `docs/architecture.md` already exists in the repository:
 ## Execution & Control Loop (Zero Orchestration Tax)
 
 1. **Track Tasks in Beads (`bd`) When Available**
-   - Record tasks and dependencies via `bd create` and pass `--bead <id>` to `w spawn`. This preserves state across 5-hour subscription rate limits and enables seamless handoffs between CLIs.
+   - Record tasks and dependencies via `bd create` and pass `--bead <id>` to `aw spawn`. This preserves state across 5-hour subscription rate limits and enables seamless handoffs between CLIs.
 
-2. **Dispatch Persistent Workers (`w spawn`)**
+2. **Dispatch Persistent Workers (`aw spawn`)**
    - Spawn 2-4 concurrent workers in isolated git worktrees, spreading workload across subscriptions (e.g. `codex` for core logic, `pi` or `gemini` for tests/secondary modules):
      ```bash
-     w spawn <name> -b <codex|pi|gemini|claude> \
+     aw spawn <name> -b <codex|pi|gemini|claude> \
        --allow "<dir1/,dir2/>" \
        --verify "<test/typecheck command>" \
        --bead "<bd-id>" \
@@ -62,27 +62,27 @@ Check whether `docs/architecture.md` already exists in the repository:
      ```
 
 3. **Monitor, Gate, and Retry In-Place (Never Disposable)**
-   - Wait for events with `w wait --any` (inspect with `w ls` / `w logs <name> --last`).
+   - Wait for events with `aw wait --any` (inspect with `aw ls` / `aw logs <name> --last`).
    - When a worker becomes `IDLE`, run the zero-token hard gate:
      ```bash
-     w check <name>
+     aw check <name>
      ```
-   - **If `w check` FAILS** (out-of-bounds edits or failing `verify_cmd`):
+   - **If `aw check` FAILS** (out-of-bounds edits or failing `verify_cmd`):
      - Do **NOT** delete and restart from scratch.
      - Resume the **same persistent session** with targeted feedback:
        ```bash
-       w send <name> "Hard gate failed: <exact violations or test errors>. Fix inside allowed_paths and re-verify."
+       aw send <name> "Hard gate failed: <exact violations or test errors>. Fix inside allowed_paths and re-verify."
        ```
    - **If a worker hits `RATE_LIMITED`** (5-hour quota window):
      - Do not loop-retry the same backend. Report clearly or hand off the existing branch/Bead to an alternate backend (`pi` / `gemini` / `claude`).
-   - **Lightweight Semantic Screen**: Once `w check` passes, check `git diff --stat` (or run a read-only `codex exec review`) against `docs/architecture.md` red lines. If the worker cheated with mocks or violated architecture boundaries, `w send <name>` to fix in place.
+   - **Lightweight Semantic Screen**: Once `aw check` passes, check `git diff --stat` (or run a read-only `codex exec review`) against `docs/architecture.md` red lines. If the worker cheated with mocks or violated architecture boundaries, `aw send <name>` to fix in place.
 
 4. **Exception-Based Architect Report (No Diff Flooding)**
    - Never dump thousands of lines of raw diff onto the user.
-   - Run `w report --run-check` and present a crisp 1-screen **Architect Brief**:
+   - Run `aw report --run-check` and present a crisp 1-screen **Architect Brief**:
      - **Exceptions Requiring Attention**: out-of-bounds edits, touched sensitive/contract files (`package.json`, `Cargo.toml`, `docs/architecture.md`, `DESIGN.md`, etc.), failed checks, rate-limit pauses, or any architecture deviations.
      - **Compliant Workers**: 1-2 line summary per worker + verification status.
    - **Never merge into main/master without user confirmation.** Once the user approves, run:
      ```bash
-     w merge <name> --auto-commit --delete
+     aw merge <name> --auto-commit --delete
      ```

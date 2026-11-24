@@ -12,7 +12,7 @@
 | 默认用户 | `agent`（UID `1000`，支持免密 `sudo`） |
 | 工作目录 | `/home/agent/workspace` |
 | Coding Agent CLIs | **Codex CLI**、**Pi Coding Agent**、**Claude Code**、**Gemini CLI** |
-| 轻量编排层（默认推荐） | **`w`**（零依赖持久化 Worker 编排 CLI）+ **`bd`（Beads 任务账本）** + `leader-orchestrator` Skill |
+| 轻量编排层（默认推荐） | **`aw`**（零依赖持久化 Worker 编排 CLI）+ **`bd`（Beads 任务账本）** + `leader-orchestrator` Skill |
 | 重型编排层（大并发备用） | **Gas Town (`gt`)** + **Dolt** + **tmux** |
 | 基础开发工具 | Git、ripgrep、jq、tmux、sqlite3、Python 3、fnm、Node.js、pnpm、Go、bubblewrap、build-essential |
 | 远程访问 | OpenSSH Server，默认宿主机端口 **`6666`** 映射到容器 `22` |
@@ -110,43 +110,43 @@ gemini
 2. **日常功能迭代（轻量增量模式）**
    - `-1` 直接读取 `docs/architecture.md` 作为项目宪法，花 2 分钟给出本次 2~4 个 Worker 的任务切分表（每个任务明确 `--allow` 允许改动路径和 `--verify` 验收命令）。
    - 用 `bd`（Beads）记录任务依赖，防 5 小时订阅限频断线丢进度。
-   - `-1` 通过内置 **`w`** CLI 并发拉起持久化 `-2`（可跨 `codex` / `pi` / `gemini` / `claude` 分摊各家 5 小时订阅额度）。
-   - `-2` 跑完后自动跑 **0 Token 硬门禁（`w check`）**——越界改文件或测试失败时，`-1` 直接 `w send` 在原上下文中要求返工，**绝不次抛重开**。
-   - 全部通过后运行 **`w report --run-check`** 生成一屏**架构师例外简报**（合规全绿项折叠，只高亮越界、改依赖/契约、失败或限频项），你确认后一键 `w merge`。
+   - `-1` 通过内置 **`aw`** CLI 并发拉起持久化 `-2`（可跨 `codex` / `pi` / `gemini` / `claude` 分摊各家 5 小时订阅额度）。
+   - `-2` 跑完后自动跑 **0 Token 硬门禁（`aw check`）**——越界改文件或测试失败时，`-1` 直接 `aw send` 在原上下文中要求返工，**绝不次抛重开**。
+   - 全部通过后运行 **`aw report --run-check`** 生成一屏**架构师例外简报**（合规全绿项折叠，只高亮越界、改依赖/契约、失败或限频项），你确认后一键 `aw merge`。
 
-### 轻量编排工具 `w` 常用命令速查
+### 轻量编排工具 `aw` 常用命令速查
 
 ```bash
 # 1. 创建独立 git worktree 并后台拉起持久化 Worker
-w spawn core-impl -b codex \
+aw spawn core-impl -b codex \
   --allow "src/core/" \
   --verify "pnpm test -- core" \
   -p "严格遵守 docs/architecture.md，实现核心模块并提交代码。"
 
 # 2. 查看所有并发 Worker 状态、轮次、改动文件与越界数
-w ls
+aw ls
 
 # 3. 等待任意一个（或全部）Worker 完成本轮
-w wait --any
+aw wait --any
 
 # 4. 查看 Worker 最新回复摘要或原始日志
-w logs core-impl --last
-w logs core-impl --tail 80
+aw logs core-impl --last
+aw logs core-impl --tail 80
 
 # 5. 运行 0 Token 硬门禁（路径越界检测 + 敏感/契约文件告警 + verify 命令）
-w check core-impl
+aw check core-impl
 
 # 6. 原地续聊纠偏（保留完整会话上下文，不重建）
-w send core-impl "测试报错 xxx，请只在 src/core/ 内修复后重跑验证。"
+aw send core-impl "测试报错 xxx，请只在 src/core/ 内修复后重跑验证。"
 
 # 7. 生成一屏架构师例外简报
-w report --run-check
+aw report --run-check
 
 # 8. 终审通过后合并回当前主分支并清理 worktree/分支
-w merge core-impl --auto-commit --delete
+aw merge core-impl --auto-commit --delete
 
 # 9. 放弃并清理某个 Worker
-w rm core-impl --force
+aw rm core-impl --force
 ```
 
 ### 未来升级到大并发（8~20 个 Agent）
