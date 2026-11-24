@@ -4,39 +4,70 @@ services:
       context: .
       dockerfile: Containerfile
       args:
-        USE_CHINA_APT_MIRROR: ${USE_CHINA_APT_MIRROR:-true}
-        USE_PROXY: ${USE_PROXY:-true}
-        PROXY_IP: ${PROXY_IP:-192.168.3.70}
-        PROXY_PORT: ${PROXY_PORT:-7890}
-        PROXY_USER: ${PROXY_USER:-}
-        PROXY_PASS: ${PROXY_PASS:-}
-        USE_CHINA_NPM_MIRROR: ${USE_CHINA_NPM_MIRROR:-true}
-        NODE_VERSION: ${NODE_VERSION:-26.8.2}
-        PNPM_VERSION: ${PNPM_VERSION:-12.4.1}
-        CODEX_VERSION: ${CODEX_VERSION:-0.154.0}
-        PI_VERSION: ${PI_VERSION:-0.85.1}
-    image: localhost/agent-container:${AGENT_CONTAINER_VERSION:-0.1.0}
-    container_name: agent-container-${AGENT_CONTAINER_VERSION:-0.1.0}
-    
-    # 将容器用户映射到当前 Rootless Podman 用户
+        USE_CHINA_APT_MIRROR: "true"
+        USE_PROXY: "true"
+        PROXY_IP: "192.168.3.110"
+        PROXY_PORT: "7890"
+        USE_CHINA_NPM_MIRROR: "true"
+        USE_CHINA_GO_PROXY: "true"
+        NODE_VERSION: "26.8.2"
+        PNPM_VERSION: "12.4.1"
+        CODEX_VERSION: "0.154.0"
+        PI_VERSION: "0.85.1"
+        CLAUDE_CODE_VERSION: "latest"
+        GEMINI_CLI_VERSION: "latest"
+        GO_VERSION: "1.26.0"
+        BEADS_VERSION: "latest"
+        GASTOWN_VERSION: "latest"
+    image: localhost/agent-container:0.2.0-gastown
+    container_name: agent-container-0.2.0-gastown
+
+    # 开启 tini 回收 tmux / Gas Town 多 Agent 产生的僵尸子进程
+    init: true
+
+    # 将容器用户映射到当前 Rootless Podman 用户（启动需加 --in-pod=0）
     userns_mode: "keep-id"
-    
-    # SSH 端口映射 (宿主机 2233 -> 容器 22)
+
+    # 资源护栏，防止并发编译或 Agent 失控拖垮宿主机
+    mem_limit: 12g
+    cpus: 6
+
+    # SSH 端口映射 (宿主机 6666 -> 容器 22)
     ports:
-      - "${SSH_PORT:-2233}:22"
-    
-    working_dir: ${WORKSPACE_DIRD:-/home/agent/workspace}
-    
+      - "6666:22"
+
+    working_dir: /home/agent/workspace
+
     volumes:
-      - .:${WORKSPACE_DIRD:-/home/agent/workspace}:Z
-    
+      # 业务代码工作区（宿主机目录直挂，方便 Remote-SSH 与 Git 管理）
+      - /home/agent-aoyama/workspace:/home/agent/workspace:Z
+      # 各 CLI 订阅登录态与 Gas Town 状态持久化（重建镜像免重登）
+      - agent-codex:/home/agent/.codex
+      - agent-claude:/home/agent/.claude
+      - agent-gemini:/home/agent/.gemini
+      - agent-pi:/home/agent/.pi
+      - agent-gastown:/home/agent/gt
+      # 并发 git worktree 共享 pnpm 依赖缓存
+      - agent-pnpm-store:/home/agent/.local/share/pnpm/store
+
     environment:
       - NODE_ENV=development
       - PYTHONUNBUFFERED=1
-      - WORKSPACE_DIRD=${WORKSPACE_DIRD:-/home/agent/workspace}
+      - WORKSPACE_DIRD=/home/agent/workspace
+      - RUNTIME_PROXY=true
+      - PROXY_IP=192.168.3.110
+      - PROXY_PORT=7890
 
     stdin_open: true
     tty: true
 
-    # 启动 sshd，并通过 Bash 保持容器运行
-    command: /bin/bash -c "sudo /usr/sbin/sshd && /bin/bash"
+    # 启动 sshd 并常驻（方便 tmux 后台 7x24 运行与反重力 Remote-SSH 接入）
+    command: /bin/bash -c "sudo /usr/sbin/sshd && exec sleep infinity"
+
+volumes:
+  agent-codex:
+  agent-claude:
+  agent-gemini:
+  agent-pi:
+  agent-gastown:
+  agent-pnpm-store:

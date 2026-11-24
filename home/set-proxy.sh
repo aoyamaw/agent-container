@@ -8,7 +8,7 @@ if [ "${0##*/}" = "set-proxy.sh" ]; then
 fi
 
 # 默认代理参数，可通过环境变量覆盖
-PROXY_IP="${PROXY_IP:-192.168.3.70}"
+PROXY_IP="${PROXY_IP:-192.168.3.110}"
 PROXY_PORT="${PROXY_PORT:-7890}"
 PROXY_USER="${PROXY_USER:-}"       # 如果需要用户名，可在此填写或通过环境变量传入
 PROXY_PASS="${PROXY_PASS:-}"       # 如果需要密码，可在此填写

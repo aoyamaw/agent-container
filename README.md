@@ -10,7 +10,7 @@
 | 默认用户 | `agent`（UID `1000`） |
 | 工作目录 | `/home/agent/workspace` |
 | 开发工具 | Git、curl、jq、Python 3、pip、venv、fnm、固定版本 Node.js、pnpm、Codex、Pi Agent、build-essential |
-| 远程访问 | OpenSSH Server，默认宿主机端口 `2233` 映射到容器端口 `22` |
+| 远程访问 | OpenSSH Server，默认宿主机端口 `6666` 映射到容器端口 `22` |
 | 提权方式 | `agent` 用户可免密使用 `sudo` |
 | 默认 APT 源 | 清华大学镜像源，可通过构建参数关闭 |
 | 默认 npm 源 | `https://registry.npmmirror.com`，可通过构建参数关闭 |
@@ -61,11 +61,11 @@ chmod +x ./pull.sh && ./pull.sh
 
 ```bash
 # 设置 SSH 端口
-export SSH_PORT=2234
+export SSH_PORT=6667
 
 # 设置代理
 export USE_PROXY=true
-export PROXY_IP=192.168.3.70
+export PROXY_IP=192.168.3.110
 export PROXY_PORT=7890
 
 # 构建镜像并启动容器
@@ -81,7 +81,7 @@ podman compose up --build -d
 | 参数 | 默认值 | 用途 |
 | --- | --- | --- |
 | `USE_PROXY` | `true` | 仅在安装 fnm 和 Node.js 时加载代理 |
-| `PROXY_IP` | `192.168.3.70` | 代理主机地址 |
+| `PROXY_IP` | `192.168.3.110` | 代理主机地址 |
 | `PROXY_PORT` | `7890` | 代理端口 |
 | `PROXY_USER` | 空 | 代理用户名 |
 | `PROXY_PASS` | 空 | 代理密码，与用户名同时设置时启用认证 |
@@ -92,7 +92,7 @@ podman compose up --build -d
 ## SSH 连接
 
 ```bash
-ssh agent@localhost -p 2234
+ssh agent@localhost -p 6667
 ```
 
 默认凭据：
