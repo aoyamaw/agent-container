@@ -15,6 +15,7 @@ services:
         CODEX_VERSION: "0.154.0"
         PI_VERSION: "0.85.1"
         CLAUDE_CODE_VERSION: "latest"
+        CODEBUDDY_VERSION: "latest"
         GO_VERSION: "1.26.0"
         BEADS_VERSION: "latest"
         GASTOWN_VERSION: "latest"
@@ -46,6 +47,7 @@ services:
       - agent-claude:/home/agent/.claude
       - agent-gemini:/home/agent/.gemini
       - agent-pi:/home/agent/.pi
+      - agent-codebuddy:/home/agent/.codebuddy
       - agent-gastown:/home/agent/gt
       # 并发 git worktree 共享 pnpm 依赖缓存
       - agent-pnpm-store:/home/agent/.local/share/pnpm/store
@@ -69,5 +71,6 @@ volumes:
   agent-claude:
   agent-gemini:
   agent-pi:
+  agent-codebuddy:
   agent-gastown:
   agent-pnpm-store:

@@ -3,7 +3,7 @@ FROM docker.io/library/debian:trixie-slim
 
 # OCI 标准元数据
 LABEL org.opencontainers.image.title="AI Agent Execution Environment (Gas Town)" \
-      org.opencontainers.image.description="Container environment tailored for multi-agent coding workloads with Gas Town, Beads, Dolt, Codex, Pi, Claude Code, and Antigravity CLI (agy)" \
+      org.opencontainers.image.description="Container environment tailored for multi-agent coding workloads with Gas Town, Beads, Dolt, Codex, Pi, Claude Code, Antigravity CLI (agy), and CodeBuddy Code" \
       org.opencontainers.image.vendor="Local Engine" \
       org.opencontainers.image.licenses="MIT"
 
@@ -76,7 +76,7 @@ export PATH="${FNM_DIR}:${FNM_DIR}/aliases/default/bin:${PNPM_HOME}/bin:${PNPM_H
 EOF
 
 # 预创建持久化卷挂载目录，避免 Named Volume 首次挂载属主变成 root
-RUN mkdir -p /home/agent/.codex /home/agent/.claude /home/agent/.gemini /home/agent/.pi /home/agent/gt /home/agent/.local/share/pnpm/store /home/agent/.local/bin \
+RUN mkdir -p /home/agent/.codex /home/agent/.claude /home/agent/.gemini /home/agent/.pi /home/agent/.codebuddy /home/agent/gt /home/agent/.local/share/pnpm/store /home/agent/.local/bin \
     && chown -R agent:agent /home/agent
 
 COPY --chown=agent:agent home/ /home/agent/
@@ -138,13 +138,15 @@ RUN set -eu; \
 ARG CODEX_VERSION=0.154.0
 ARG PI_VERSION=0.85.1
 ARG CLAUDE_CODE_VERSION=latest
+ARG CODEBUDDY_VERSION=latest
 
 # 安装主流 Coding Agent CLI（Codex / Pi / Claude Code / Antigravity CLI (agy)）
 RUN set -eu; \
     eval "$(fnm env --shell bash)"; \
     pnpm install --global "@openai/codex@$CODEX_VERSION"; \
     pnpm add --global --ignore-scripts "@earendil-works/pi-coding-agent@$PI_VERSION"; \
-    pnpm install --global "@anthropic-ai/claude-code@$CLAUDE_CODE_VERSION" \
+    pnpm install --global "@anthropic-ai/claude-code@$CLAUDE_CODE_VERSION"; \
+    pnpm install --global "@tencent-ai/codebuddy-code@$CODEBUDDY_VERSION" \
 
 
 # 安装 Antigravity CLI (agy) 并创建全局软链（确保非交互 SSH 直接可用）
@@ -154,7 +156,8 @@ RUN set -eu; \
         . "$HOME/set-proxy.sh"; \
     fi; \
     curl -fsSL https://antigravity.google/cli/install.sh | bash; \
-    sudo ln -sf /home/agent/.local/bin/agy /usr/local/bin/agy
+    sudo ln -sf /home/agent/.local/bin/agy /usr/local/bin/agy; \
+    sudo ln -sf /home/agent/.local/share/pnpm/bin/codebuddy /usr/local/bin/codebuddy
 ARG GO_VERSION=1.26.0
 ARG USE_CHINA_GO_PROXY=true
 ARG BEADS_VERSION=latest
