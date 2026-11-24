@@ -64,7 +64,23 @@ RUN echo "agent ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/agent \
     && chmod 0440 /etc/sudoers.d/agent
 
 # 将外部工具和脚本放入 agent 用户目录，并追加外部 bashrc 配置
+# 确保非交互 SSH / 登录 shell 同样保留完整 PATH
+RUN cat <<'EOF' > /etc/profile.d/agent-env.sh
+export WORKSPACE_DIRD="/home/agent/workspace"
+export FNM_DIR="/home/agent/.local/share/fnm"
+export PNPM_HOME="/home/agent/.local/share/pnpm"
+export GOROOT="/usr/local/go"
+export GOPATH="/home/agent/go"
+export GOTOOLCHAIN="auto"
+export PATH="${FNM_DIR}:${FNM_DIR}/aliases/default/bin:${PNPM_HOME}/bin:${PNPM_HOME}:${GOPATH}/bin:${GOROOT}/bin:/home/agent/.local/bin:${PATH}"
+EOF
+
+# 预创建持久化卷挂载目录，避免 Named Volume 首次挂载属主变成 root
+RUN mkdir -p /home/agent/.codex /home/agent/.claude /home/agent/.gemini /home/agent/.pi /home/agent/gt /home/agent/.local/share/pnpm/store /home/agent/.local/bin \
+    && chown -R agent:agent /home/agent
+
 COPY --chown=agent:agent home/ /home/agent/
+RUN chmod +x /home/agent/.local/bin/w
 COPY bashrc.sh /tmp/agent-bashrc
 RUN printf '\n' >> /home/agent/.bashrc \
     && cat /tmp/agent-bashrc >> /home/agent/.bashrc \

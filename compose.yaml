@@ -24,6 +24,7 @@ services:
 
     # 开启 tini 回收 tmux / Gas Town 多 Agent 产生的僵尸子进程
     init: true
+    restart: unless-stopped
 
     # 将容器用户映射到当前 Rootless Podman 用户（启动需加 --in-pod=0）
     userns_mode: "keep-id"

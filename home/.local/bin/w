@@ -1,0 +1,793 @@
+#!/usr/bin/env python3
+"""
+w - Minimal persistent multi-agent worker orchestrator (zero-dependency stdlib).
+
+Manages persistent coding agent sessions (codex / pi / gemini / claude) in
+isolated git worktrees with hard path-boundary checks, test gates, and
+exception-based architect reports.
+"""
+
+import argparse
+import fnmatch
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import time
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+STATE_DIR_NAME = ".agent-workers"
+SENSITIVE_FILES = {
+    "package.json",
+    "pnpm-lock.yaml",
+    "package-lock.json",
+    "Cargo.toml",
+    "Cargo.lock",
+    "go.mod",
+    "go.sum",
+    "pyproject.toml",
+    "requirements.txt",
+    "DESIGN.md",
+    "ARCHITECTURE.md",
+}
+RATE_LIMIT_RE = re.compile(
+    r"(rate.?limit|429|usage.?limit|5.?hour|quota.?exceeded|too many requests)",
+    re.IGNORECASE,
+)
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def run_git(args: list[str], cwd: Path, check: bool = True) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        text=True,
+        capture_output=True,
+        check=check,
+    )
+
+
+def get_repo_root() -> Path:
+    res = run_git(["rev-parse", "--show-toplevel"], Path.cwd(), check=False)
+    if res.returncode != 0:
+        sys.exit("Error: current directory is not inside a git repository.")
+    return Path(res.stdout.strip())
+
+
+def ensure_state_dirs(repo_root: Path) -> Path:
+    base = repo_root / STATE_DIR_NAME
+    (base / "workers").mkdir(parents=True, exist_ok=True)
+    (base / "logs").mkdir(parents=True, exist_ok=True)
+    (base / "worktrees").mkdir(parents=True, exist_ok=True)
+
+    # Keep repo working tree clean without touching tracked .gitignore
+    exclude_file = repo_root / ".git" / "info" / "exclude"
+    if exclude_file.exists():
+        content = exclude_file.read_text(encoding="utf-8", errors="ignore")
+        if f"{STATE_DIR_NAME}/" not in content:
+            with exclude_file.open("a", encoding="utf-8") as f:
+                if content and not content.endswith("\n"):
+                    f.write("\n")
+                f.write(f"{STATE_DIR_NAME}/\n")
+    return base
+
+
+def worker_file(base: Path, name: str) -> Path:
+    return base / "workers" / f"{name}.json"
+
+
+def load_worker(base: Path, name: str) -> dict:
+    wf = worker_file(base, name)
+    if not wf.exists():
+        sys.exit(f"Error: worker '{name}' not found.")
+    return json.loads(wf.read_text(encoding="utf-8"))
+
+
+def save_worker(base: Path, data: dict) -> None:
+    data["updated_at"] = now_iso()
+    wf = worker_file(base, data["name"])
+    tmp = wf.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    tmp.replace(wf)
+
+
+def pid_alive(pid: int | None) -> bool:
+    if not pid or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def refresh_status(base: Path, w: dict) -> dict:
+    if w.get("status") == "RUNNING" and not pid_alive(w.get("pid")):
+        # Runner exited unexpectedly before updating state
+        w["status"] = "FAILED"
+        w["pid"] = None
+        w["last_error"] = w.get("last_error") or "runner process exited unexpectedly"
+        save_worker(base, w)
+    return w
+
+
+def build_agent_cmd(w: dict, prompt: str, is_resume: bool, last_msg_path: Path) -> list[str]:
+    backend = w["backend"]
+    model = w.get("model")
+    sid = w.get("session_id")
+
+    if backend == "codex":
+        if is_resume and sid:
+            cmd = ["codex", "exec", "resume", "--json", "--full-auto", "-o", str(last_msg_path)]
+            if model:
+                cmd += ["-m", model]
+            cmd += [sid, prompt]
+            return cmd
+        cmd = ["codex", "exec", "--json", "--full-auto", "-o", str(last_msg_path)]
+        if model:
+            cmd += ["-m", model]
+        cmd.append(prompt)
+        return cmd
+
+    if backend == "pi":
+        cmd = ["pi", "-p", "--mode", "json", "--session", str(sid)]
+        if model:
+            cmd += ["--model", model]
+        cmd.append(prompt)
+        return cmd
+
+    if backend == "gemini":
+        cmd = ["gemini", "-p", prompt, "--yolo", "--skip-trust", "-o", "stream-json"]
+        if model:
+            cmd += ["-m", model]
+        if is_resume:
+            cmd += ["--resume", str(sid)]
+        else:
+            cmd += ["--session-id", str(sid)]
+        return cmd
+
+    if backend == "claude":
+        cmd = [
+            "claude",
+            "-p",
+            prompt,
+            "--permission-mode",
+            "acceptEdits",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+        ]
+        if model:
+            cmd += ["--model", model]
+        if is_resume:
+            cmd += ["--resume", str(sid)]
+        else:
+            cmd += ["--session-id", str(sid)]
+        return cmd
+
+    sys.exit(f"Error: unsupported backend '{backend}'")
+
+
+def build_env() -> dict[str, str]:
+    env = os.environ.copy()
+    home = os.path.expanduser("~")
+    extra_paths = [
+        f"{home}/.local/share/fnm",
+        f"{home}/.local/share/fnm/aliases/default/bin",
+        f"{home}/.local/share/pnpm/bin",
+        f"{home}/.local/share/pnpm",
+        f"{home}/go/bin",
+        "/usr/local/go/bin",
+        f"{home}/.local/bin",
+    ]
+    current = env.get("PATH", "")
+    parts = [p for p in extra_paths if p not in current.split(":")]
+    if parts:
+        env["PATH"] = ":".join(parts) + (":" + current if current else "")
+
+    # Auto-load container proxy if configured and not yet set
+    if env.get("RUNTIME_PROXY") == "true" and not env.get("http_proxy"):
+        ip = env.get("PROXY_IP", "192.168.3.110")
+        port = env.get("PROXY_PORT", "7890")
+        proxy = f"http://{ip}:{port}"
+        env["http_proxy"] = env["HTTP_PROXY"] = proxy
+        env["https_proxy"] = env["HTTPS_PROXY"] = proxy
+        env["all_proxy"] = env["ALL_PROXY"] = f"socks5h://{ip}:{port}"
+        no_proxy = "localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+        env["no_proxy"] = env["NO_PROXY"] = no_proxy
+    return env
+
+
+def extract_session_and_summary(backend: str, log_path: Path, last_msg_path: Path) -> tuple[str | None, str, bool]:
+    text = log_path.read_text(encoding="utf-8", errors="ignore") if log_path.exists() else ""
+    rate_limited = bool(RATE_LIMIT_RE.search(text))
+    found_sid = None
+    last_text = ""
+
+    for line in text.splitlines():
+        line_s = line.strip()
+        if not line_s.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line_s)
+        except json.JSONDecodeError:
+            continue
+
+        # Capture Codex thread/session ID
+        if backend == "codex" and not found_sid:
+            for k in ("thread_id", "session_id"):
+                if isinstance(obj.get(k), str) and obj[k]:
+                    found_sid = obj[k]
+                    break
+            if not found_sid and isinstance(obj.get("thread"), dict):
+                tid = obj["thread"].get("id")
+                if isinstance(tid, str) and tid:
+                    found_sid = tid
+
+        # Capture assistant text snippets for pi / gemini / claude
+        for key in ("result", "text", "content", "message"):
+            val = obj.get(key)
+            if isinstance(val, str) and val.strip():
+                last_text = val.strip()
+            elif isinstance(val, dict):
+                c = val.get("content")
+                if isinstance(c, str) and c.strip():
+                    last_text = c.strip()
+                elif isinstance(c, list):
+                    chunks = [
+                        item.get("text", "")
+                        for item in c
+                        if isinstance(item, dict) and isinstance(item.get("text"), str)
+                    ]
+                    joined = "".join(chunks).strip()
+                    if joined:
+                        last_text = joined
+
+    if last_msg_path.exists():
+        raw = last_msg_path.read_text(encoding="utf-8", errors="ignore").strip()
+        if raw:
+            last_text = raw
+    elif last_text:
+        last_msg_path.write_text(last_text + "\n", encoding="utf-8")
+
+    return found_sid, last_text[:1000], rate_limited
+
+
+def cmd_internal_run(args: argparse.Namespace) -> None:
+    repo_root = Path(args.repo_root)
+    base = repo_root / STATE_DIR_NAME
+    w = load_worker(base, args.name)
+    turn = int(args.turn)
+    is_resume = bool(args.resume)
+    prompt_file = Path(args.prompt_file)
+    prompt = prompt_file.read_text(encoding="utf-8")
+    prompt_file.unlink(missing_ok=True)
+
+    log_path = base / "logs" / f"{w['name']}.turn-{turn}.log"
+    last_msg_path = base / "logs" / f"{w['name']}.last.txt"
+    cmd = build_agent_cmd(w, prompt, is_resume, last_msg_path)
+
+    w["status"] = "RUNNING"
+    w["pid"] = os.getpid()
+    w["turns"] = turn
+    w["last_log"] = str(log_path)
+    w["last_error"] = None
+    save_worker(base, w)
+
+    env = build_env()
+    with log_path.open("w", encoding="utf-8") as lf:
+        lf.write(f"# turn={turn} resume={is_resume} started={now_iso()}\n")
+        lf.write(f"# cmd={' '.join(cmd[:-1])} <prompt:{len(prompt)} chars>\n\n")
+        lf.flush()
+        proc = subprocess.Popen(
+            cmd,
+            cwd=w["worktree"],
+            env=env,
+            stdout=lf,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        rc = proc.wait()
+
+    found_sid, summary, rate_limited = extract_session_and_summary(w["backend"], log_path, last_msg_path)
+    if found_sid and not w.get("session_id"):
+        w["session_id"] = found_sid
+
+    w["pid"] = None
+    w["last_exit_code"] = rc
+    w["last_summary"] = summary
+    if rate_limited and rc != 0:
+        w["status"] = "RATE_LIMITED"
+        w["last_error"] = "Detected rate limit / quota cap in output; switch backend or wait."
+    elif rc == 0:
+        w["status"] = "IDLE"
+    else:
+        w["status"] = "FAILED"
+        w["last_error"] = f"exited with code {rc}"
+    save_worker(base, w)
+
+
+def launch_runner(repo_root: Path, base: Path, name: str, turn: int, prompt: str, is_resume: bool) -> int:
+    prompt_file = base / "logs" / f"{name}.turn-{turn}.prompt.txt"
+    prompt_file.write_text(prompt, encoding="utf-8")
+    runner_cmd = [
+        sys.executable,
+        os.path.abspath(__file__),
+        "_run",
+        "--repo-root",
+        str(repo_root),
+        "--name",
+        name,
+        "--turn",
+        str(turn),
+        "--prompt-file",
+        str(prompt_file),
+    ]
+    if is_resume:
+        runner_cmd.append("--resume")
+
+    proc = subprocess.Popen(
+        runner_cmd,
+        cwd=str(repo_root),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return proc.pid
+
+
+def changed_files(worktree: Path, base_branch: str) -> list[str]:
+    files: set[str] = set()
+    r1 = run_git(["diff", "--name-only", f"{base_branch}...HEAD"], worktree, check=False)
+    if r1.returncode == 0:
+        files.update(line.strip() for line in r1.stdout.splitlines() if line.strip())
+    r2 = run_git(["status", "--porcelain"], worktree, check=False)
+    if r2.returncode == 0:
+        for line in r2.stdout.splitlines():
+            if len(line) > 3:
+                path = line[3:].strip()
+                if " -> " in path:
+                    path = path.split(" -> ", 1)[1].strip()
+                if path:
+                    files.add(path)
+    return sorted(files)
+
+
+def path_allowed(path: str, patterns: list[str]) -> bool:
+    if not patterns:
+        return True
+    norm = path.lstrip("./")
+    for pat in patterns:
+        p = pat.strip().lstrip("./")
+        if not p:
+            continue
+        if p.endswith("/") and norm.startswith(p):
+            return True
+        if norm == p or norm.startswith(p + "/"):
+            return True
+        if fnmatch.fnmatch(norm, p):
+            return True
+    return False
+
+
+def cmd_spawn(args: argparse.Namespace) -> None:
+    repo_root = get_repo_root()
+    base = ensure_state_dirs(repo_root)
+    name = args.name
+    if not re.fullmatch(r"[a-zA-Z0-9._-]+", name):
+        sys.exit("Error: worker name must match [a-zA-Z0-9._-]+")
+    if worker_file(base, name).exists():
+        sys.exit(f"Error: worker '{name}' already exists. Use 'w send {name}' or 'w rm {name}'.")
+
+    base_branch = args.base or run_git(["rev-parse", "--abbrev-ref", "HEAD"], repo_root).stdout.strip()
+    branch = f"agent/{name}"
+    worktree = base / "worktrees" / name
+
+    # Ensure worktree & branch
+    if worktree.exists():
+        sys.exit(f"Error: worktree path already exists: {worktree}")
+    branch_exists = run_git(["show-ref", "--verify", f"refs/heads/{branch}"], repo_root, check=False).returncode == 0
+    if branch_exists:
+        run_git(["worktree", "add", str(worktree), branch], repo_root)
+    else:
+        run_git(["worktree", "add", "-b", branch, str(worktree), base_branch], repo_root)
+
+    if args.backend == "pi":
+        session_id = str(base / "logs" / f"{name}.pi.jsonl")
+    elif args.backend in ("gemini", "claude"):
+        session_id = str(uuid.uuid4())
+    else:
+        session_id = None  # codex assigns thread_id on first turn
+
+    allowed = [p.strip() for p in (args.allow or "").split(",") if p.strip()]
+    w = {
+        "name": name,
+        "backend": args.backend,
+        "model": args.model,
+        "base_branch": base_branch,
+        "branch": branch,
+        "worktree": str(worktree),
+        "session_id": session_id,
+        "allowed_paths": allowed,
+        "verify_cmd": args.verify,
+        "bead_id": args.bead,
+        "status": "IDLE",
+        "pid": None,
+        "turns": 0,
+        "last_exit_code": None,
+        "last_error": None,
+        "last_summary": "",
+        "last_check": None,
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+    }
+    save_worker(base, w)
+
+    prompt = args.prompt
+    if args.prompt_file:
+        prompt = Path(args.prompt_file).read_text(encoding="utf-8")
+
+    if prompt:
+        pid = launch_runner(repo_root, base, name, 1, prompt, is_resume=False)
+        w["status"] = "RUNNING"
+        w["pid"] = pid
+        w["turns"] = 1
+        save_worker(base, w)
+        print(f"Spawned worker '{name}' ({args.backend}) in {worktree} [branch: {branch}] (pid={pid})")
+    else:
+        print(f"Created idle worker '{name}' ({args.backend}) in {worktree} [branch: {branch}]")
+
+
+def cmd_send(args: argparse.Namespace) -> None:
+    repo_root = get_repo_root()
+    base = ensure_state_dirs(repo_root)
+    w = refresh_status(base, load_worker(base, args.name))
+    if w["status"] == "RUNNING":
+        sys.exit(f"Error: worker '{args.name}' is still RUNNING (pid={w.get('pid')}). Wait for it first.")
+
+    prompt = args.prompt
+    if args.prompt_file:
+        prompt = Path(args.prompt_file).read_text(encoding="utf-8")
+    if not prompt:
+        sys.exit("Error: prompt is required.")
+
+    next_turn = int(w.get("turns", 0)) + 1
+    is_resume = next_turn > 1
+    pid = launch_runner(repo_root, base, w["name"], next_turn, prompt, is_resume=is_resume)
+    w["status"] = "RUNNING"
+    w["pid"] = pid
+    w["turns"] = next_turn
+    save_worker(base, w)
+    print(f"Sent turn {next_turn} to '{w['name']}' ({w['backend']}, resume={is_resume}, pid={pid})")
+
+
+def list_all_workers(base: Path) -> list[dict]:
+    items = []
+    for wf in sorted((base / "workers").glob("*.json")):
+        w = json.loads(wf.read_text(encoding="utf-8"))
+        items.append(refresh_status(base, w))
+    return items
+
+
+def cmd_ls(args: argparse.Namespace) -> None:
+    repo_root = get_repo_root()
+    base = ensure_state_dirs(repo_root)
+    workers = list_all_workers(base)
+    if args.json:
+        print(json.dumps(workers, indent=2, ensure_ascii=False))
+        return
+    if not workers:
+        print("No workers yet. Use 'w spawn <name> -b codex -p \"...\"' to start one.")
+        return
+
+    header = f"{'NAME':<14} {'BACKEND':<8} {'STATUS':<12} {'TURNS':<5} {'FILES':<5} {'VIOL':<4} {'BEAD':<10} {'BRANCH'}"
+    print(header)
+    print("-" * len(header))
+    for w in workers:
+        wt = Path(w["worktree"])
+        files = changed_files(wt, w["base_branch"]) if wt.exists() else []
+        viol = [f for f in files if not path_allowed(f, w.get("allowed_paths") or [])]
+        bead = w.get("bead_id") or "-"
+        print(
+            f"{w['name']:<14} {w['backend']:<8} {w['status']:<12} "
+            f"{w.get('turns', 0):<5} {len(files):<5} {len(viol):<4} {bead:<10} {w['branch']}"
+        )
+
+
+def cmd_wait(args: argparse.Namespace) -> None:
+    repo_root = get_repo_root()
+    base = ensure_state_dirs(repo_root)
+    targets = args.names
+    deadline = time.time() + args.timeout
+
+    while True:
+        workers = [refresh_status(base, load_worker(base, n)) for n in targets] if targets else list_all_workers(base)
+        if not workers:
+            print("No workers to wait for.")
+            return
+        running = [w for w in workers if w["status"] == "RUNNING"]
+        finished = [w for w in workers if w["status"] != "RUNNING"]
+
+        if args.any and finished:
+            for w in finished:
+                print(f"{w['name']}: {w['status']} (turn={w['turns']}, exit={w.get('last_exit_code')})")
+            return
+        if not running:
+            for w in workers:
+                print(f"{w['name']}: {w['status']} (turn={w['turns']}, exit={w.get('last_exit_code')})")
+            return
+        if time.time() >= deadline:
+            print(f"Timeout after {args.timeout}s. Still running: {[w['name'] for w in running]}")
+            sys.exit(124)
+        time.sleep(2)
+
+
+def cmd_logs(args: argparse.Namespace) -> None:
+    repo_root = get_repo_root()
+    base = ensure_state_dirs(repo_root)
+    w = refresh_status(base, load_worker(base, args.name))
+    if args.last:
+        p = base / "logs" / f"{w['name']}.last.txt"
+        if p.exists():
+            print(p.read_text(encoding="utf-8", errors="ignore"))
+        else:
+            print(w.get("last_summary") or "(no summary yet)")
+        return
+    turn = args.turn or w.get("turns") or 1
+    p = base / "logs" / f"{w['name']}.turn-{turn}.log"
+    if not p.exists():
+        sys.exit(f"Log not found: {p}")
+    lines = p.read_text(encoding="utf-8", errors="ignore").splitlines()
+    print("\n".join(lines[-args.tail :]))
+
+
+def run_check_for_worker(base: Path, w: dict) -> dict:
+    wt = Path(w["worktree"])
+    files = changed_files(wt, w["base_branch"]) if wt.exists() else []
+    allowed = w.get("allowed_paths") or []
+    violations = [f for f in files if not path_allowed(f, allowed)]
+    sensitive = [f for f in files if Path(f).name in SENSITIVE_FILES]
+
+    verify_ok = None
+    verify_output = ""
+    if w.get("verify_cmd"):
+        res = subprocess.run(
+            ["bash", "-lc", w["verify_cmd"]],
+            cwd=str(wt),
+            env=build_env(),
+            text=True,
+            capture_output=True,
+        )
+        verify_ok = res.returncode == 0
+        verify_output = ((res.stdout or "") + "\n" + (res.stderr or "")).strip()[-1200:]
+
+    passed = (len(violations) == 0) and (verify_ok is not False)
+    result = {
+        "checked_at": now_iso(),
+        "passed": passed,
+        "changed_files": files,
+        "violations": violations,
+        "sensitive_changes": sensitive,
+        "verify_cmd": w.get("verify_cmd"),
+        "verify_ok": verify_ok,
+        "verify_tail": verify_output,
+    }
+    w["last_check"] = result
+    save_worker(base, w)
+    return result
+
+
+def cmd_check(args: argparse.Namespace) -> None:
+    repo_root = get_repo_root()
+    base = ensure_state_dirs(repo_root)
+    w = refresh_status(base, load_worker(base, args.name))
+    res = run_check_for_worker(base, w)
+    print(f"=== Check: {w['name']} ({'PASS' if res['passed'] else 'FAIL'}) ===")
+    print(f"Changed files ({len(res['changed_files'])}): {', '.join(res['changed_files']) or '(none)'}")
+    if res["violations"]:
+        print(f"[VIOLATION] Out-of-bounds files: {', '.join(res['violations'])}")
+    if res["sensitive_changes"]:
+        print(f"[ATTENTION] Sensitive/contract files touched: {', '.join(res['sensitive_changes'])}")
+    if res["verify_cmd"]:
+        print(f"Verify (`{res['verify_cmd']}`): {'PASS' if res['verify_ok'] else 'FAIL'}")
+        if not res["verify_ok"] and res["verify_tail"]:
+            print("--- verify tail ---")
+            print(res["verify_tail"])
+    if not res["passed"]:
+        sys.exit(1)
+
+
+def cmd_report(args: argparse.Namespace) -> None:
+    repo_root = get_repo_root()
+    base = ensure_state_dirs(repo_root)
+    workers = list_all_workers(base)
+    if not workers:
+        print("No workers found.")
+        return
+
+    print("# Architect Exception Report\n")
+    exceptions = []
+    clean = []
+
+    for w in workers:
+        chk = w.get("last_check")
+        if args.run_check and w["status"] != "RUNNING":
+            chk = run_check_for_worker(base, w)
+        wt = Path(w["worktree"])
+        files = chk["changed_files"] if chk else (changed_files(wt, w["base_branch"]) if wt.exists() else [])
+        viol = chk["violations"] if chk else [f for f in files if not path_allowed(f, w.get("allowed_paths") or [])]
+        sens = chk["sensitive_changes"] if chk else [f for f in files if Path(f).name in SENSITIVE_FILES]
+        verify_ok = chk["verify_ok"] if chk else None
+
+        is_exc = (
+            w["status"] in ("FAILED", "RATE_LIMITED")
+            or bool(viol)
+            or bool(sens)
+            or (verify_ok is False)
+        )
+        entry = (w, files, viol, sens, verify_ok)
+        (exceptions if is_exc else clean).append(entry)
+
+    if exceptions:
+        print("## [!] Exceptions Requiring Your Attention")
+        for w, files, viol, sens, verify_ok in exceptions:
+            print(f"- **{w['name']}** (`{w['backend']}`, status=`{w['status']}`, files={len(files)}, branch=`{w['branch']}`)")
+            if w.get("last_error"):
+                print(f"  - Error: {w['last_error']}")
+            if viol:
+                print(f"  - Out-of-bounds paths: {', '.join(viol)}")
+            if sens:
+                print(f"  - Sensitive/contract files: {', '.join(sens)}")
+            if verify_ok is False:
+                print(f"  - Verify FAILED: `{w.get('verify_cmd')}`")
+        print()
+    else:
+        print("## [OK] No Exceptions Detected\n")
+
+    if clean:
+        print("## [OK] Compliant Workers (Summary Only)")
+        for w, files, _, _, verify_ok in clean:
+            v_str = "pass" if verify_ok is True else ("n/a" if verify_ok is None else "fail")
+            first_line = (w.get("last_summary") or "").splitlines()[0][:100] if w.get("last_summary") else "(no summary)"
+            print(f"- **{w['name']}** (`{w['backend']}`, status=`{w['status']}`, files={len(files)}, verify={v_str}) — {first_line}")
+
+
+def cmd_merge(args: argparse.Namespace) -> None:
+    repo_root = get_repo_root()
+    base = ensure_state_dirs(repo_root)
+    w = refresh_status(base, load_worker(base, args.name))
+    if w["status"] == "RUNNING":
+        sys.exit(f"Error: worker '{args.name}' is still RUNNING.")
+
+    # Auto-commit uncommitted work inside worker worktree if requested or clean check
+    wt = Path(w["worktree"])
+    wt_status = run_git(["status", "--porcelain"], wt).stdout.strip()
+    if wt_status:
+        if args.auto_commit:
+            run_git(["add", "-A"], wt)
+            run_git(["commit", "-m", f"agent({w['name']}): complete task"], wt)
+        else:
+            sys.exit(f"Error: worktree {wt} has uncommitted changes. Commit them or pass --auto-commit.")
+
+    root_status = run_git(["status", "--porcelain"], repo_root).stdout.strip()
+    if root_status:
+        sys.exit("Error: main workspace has uncommitted changes; commit or stash before merging.")
+
+    if args.squash:
+        run_git(["merge", "--squash", w["branch"]], repo_root)
+        print(f"Squash-merged '{w['branch']}' into current branch (staged; run 'git commit' to finalize).")
+    else:
+        run_git(["merge", "--no-ff", w["branch"], "-m", f"merge: agent/{w['name']}"], repo_root)
+        print(f"Merged '{w['branch']}' into current branch.")
+
+    if args.delete:
+        cleanup_worker(repo_root, base, w, force=True)
+
+
+def cleanup_worker(repo_root: Path, base: Path, w: dict, force: bool = False) -> None:
+    if pid_alive(w.get("pid")):
+        if not force:
+            sys.exit(f"Error: worker '{w['name']}' is RUNNING (pid={w['pid']}). Pass --force to kill.")
+        try:
+            os.killpg(w["pid"], signal.SIGTERM)
+        except OSError:
+            pass
+    wt = Path(w["worktree"])
+    if wt.exists():
+        run_git(["worktree", "remove", "--force", str(wt)], repo_root, check=False)
+        if wt.exists():
+            shutil.rmtree(wt, ignore_errors=True)
+    run_git(["branch", "-D", w["branch"]], repo_root, check=False)
+    worker_file(base, w["name"]).unlink(missing_ok=True)
+    print(f"Removed worker '{w['name']}' and cleaned up worktree/branch.")
+
+
+def cmd_rm(args: argparse.Namespace) -> None:
+    repo_root = get_repo_root()
+    base = ensure_state_dirs(repo_root)
+    w = refresh_status(base, load_worker(base, args.name))
+    cleanup_worker(repo_root, base, w, force=args.force)
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(prog="w", description="Minimal persistent multi-agent worker orchestrator")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sp = sub.add_parser("spawn", help="Create worktree and spawn a persistent worker")
+    sp.add_argument("name")
+    sp.add_argument("-b", "--backend", choices=["codex", "pi", "gemini", "claude"], default="codex")
+    sp.add_argument("-m", "--model", default=None)
+    sp.add_argument("--allow", default="", help="Comma-separated allowed path prefixes/globs")
+    sp.add_argument("--verify", default=None, help="Verification command to run in worktree")
+    sp.add_argument("--bead", default=None, help="Associated Beads (bd) issue ID")
+    sp.add_argument("--base", default=None, help="Base branch (default: current HEAD branch)")
+    sp.add_argument("-p", "--prompt", default=None, help="Initial task prompt")
+    sp.add_argument("-f", "--prompt-file", default=None, help="Read initial prompt from file")
+    sp.set_defaults(func=cmd_spawn)
+
+    sd = sub.add_parser("send", help="Resume an existing worker session with a follow-up message")
+    sd.add_argument("name")
+    sd.add_argument("prompt", nargs="?", default=None)
+    sd.add_argument("-f", "--prompt-file", default=None)
+    sd.set_defaults(func=cmd_send)
+
+    ls = sub.add_parser("ls", help="List all workers and status")
+    ls.add_argument("--json", action="store_true")
+    ls.set_defaults(func=cmd_ls)
+
+    wt = sub.add_parser("wait", help="Wait for worker(s) to finish current turn")
+    wt.add_argument("names", nargs="*")
+    wt.add_argument("--any", action="store_true", help="Return as soon as any worker finishes")
+    wt.add_argument("--timeout", type=int, default=600)
+    wt.set_defaults(func=cmd_wait)
+
+    lg = sub.add_parser("logs", help="Inspect worker logs or last message")
+    lg.add_argument("name")
+    lg.add_argument("--tail", type=int, default=60)
+    lg.add_argument("--turn", type=int, default=None)
+    lg.add_argument("--last", action="store_true", help="Print only last assistant message")
+    lg.set_defaults(func=cmd_logs)
+
+    ck = sub.add_parser("check", help="Run boundary check + verify_cmd gate on a worker")
+    ck.add_argument("name")
+    ck.set_defaults(func=cmd_check)
+
+    rp = sub.add_parser("report", help="Generate exception-based architect report")
+    rp.add_argument("--run-check", action="store_true", help="Run check on all non-running workers first")
+    rp.set_defaults(func=cmd_report)
+
+    mg = sub.add_parser("merge", help="Merge a reviewed worker branch into current branch")
+    mg.add_argument("name")
+    mg.add_argument("--squash", action="store_true")
+    mg.add_argument("--auto-commit", action="store_true")
+    mg.add_argument("--delete", action="store_true", help="Clean up worktree/branch after merge")
+    mg.set_defaults(func=cmd_merge)
+
+    rm = sub.add_parser("rm", help="Remove a worker and clean up its worktree/branch")
+    rm.add_argument("name")
+    rm.add_argument("--force", action="store_true")
+    rm.set_defaults(func=cmd_rm)
+
+    ir = sub.add_parser("_run")
+    ir.add_argument("--repo-root", required=True)
+    ir.add_argument("--name", required=True)
+    ir.add_argument("--turn", required=True)
+    ir.add_argument("--prompt-file", required=True)
+    ir.add_argument("--resume", action="store_true")
+    ir.set_defaults(func=cmd_internal_run)
+
+    args = p.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
