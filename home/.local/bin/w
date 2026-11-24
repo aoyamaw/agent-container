@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-w - Minimal persistent multi-agent worker orchestrator (zero-dependency stdlib).
+aw - Minimal persistent multi-agent worker orchestrator (zero-dependency stdlib).
 
-Manages persistent coding agent sessions (codex / pi / agy / codebuddy / claude) in
-isolated git worktrees with hard path-boundary checks, test gates, and
+Manages persistent coding agent sessions (codex / agy / codebuddy / pi / claude)
+in isolated git worktrees with Cost-per-Solved-Task role routing, same-branch
+handoff failover, hard path-boundary checks, heterogeneous review, and
 exception-based architect reports.
 """
 
@@ -34,11 +35,73 @@ SENSITIVE_FILES = {
     "requirements.txt",
     "DESIGN.md",
     "ARCHITECTURE.md",
+    "architecture.md",
+    "design.md",
 }
 RATE_LIMIT_RE = re.compile(
     r"(rate.?limit|429|usage.?limit|5.?hour|quota.?exceeded|too many requests)",
     re.IGNORECASE,
 )
+
+# Default 3-pool routing table (Cost per Solved Task & 5h quota balancing).
+# Can be overridden via ~/.config/aw/routes.json
+DEFAULT_ROUTES = {
+    "core": {
+        "desc": "Core logic, strongly-typed backend/algorithms, hard debugging",
+        "primary": {"backend": "codex", "model": "gpt-6.2-sol"},
+        "fallbacks": [
+            {"backend": "agy", "model": "claude-sonnet-5-5-medium"},
+            {"backend": "agy", "model": "claude-opus-5-5-medium"},
+            {"backend": "codebuddy", "model": "deepseek-v4-pro"},
+        ],
+    },
+    "ui": {
+        "desc": "Frontend UI/UX, large cross-file context integration, docs",
+        "primary": {"backend": "agy", "model": "gemini-4-neon-medium"},
+        "fallbacks": [
+            {"backend": "agy", "model": "claude-sonnet-5-5-medium"},
+            {"backend": "codebuddy", "model": "kimi-k3.1-pro"},
+        ],
+    },
+    "crud": {
+        "desc": "Routine APIs, forms, glue code, boilerplate (saves Codex/AGY 5h quota)",
+        "primary": {"backend": "codebuddy", "model": "deepseek-v4-pro", "fallback_model": "glm-5.3"},
+        "fallbacks": [
+            {"backend": "codebuddy", "model": "glm-5.3"},
+            {"backend": "agy", "model": "gemini-3.8-flash-high"},
+        ],
+    },
+    "test": {
+        "desc": "Unit tests, edge cases, helper scripts (ultra-low cost)",
+        "primary": {"backend": "codebuddy", "model": "glm-5.3-flash", "fallback_model": "deepseek-v4.1-flash"},
+        "fallbacks": [
+            {"backend": "agy", "model": "gemini-3.8-flash-medium"},
+            {"backend": "codex", "model": "gpt-6-luna"},
+        ],
+    },
+}
+
+DEFAULT_REVIEW_ROUTES = {
+    # Heterogeneous cross-review: never let the same provider self-review
+    "codex": {"backend": "agy", "model": "gemini-3.8-flash-high"},
+    "agy": {"backend": "codex", "model": "codex-auto-review"},
+    "codebuddy": {"backend": "codex", "model": "codex-auto-review"},
+    "pi": {"backend": "codex", "model": "codex-auto-review"},
+    "claude": {"backend": "codex", "model": "codex-auto-review"},
+}
+
+
+def load_routes() -> dict:
+    routes = json.loads(json.dumps(DEFAULT_ROUTES))
+    custom = Path.home() / ".config" / "aw" / "routes.json"
+    if custom.exists():
+        try:
+            user_cfg = json.loads(custom.read_text(encoding="utf-8"))
+            if isinstance(user_cfg, dict):
+                routes.update(user_cfg)
+        except Exception as e:
+            print(f"[warn] failed to load {custom}: {e}", file=sys.stderr)
+    return routes
 
 
 def now_iso() -> str:
@@ -68,7 +131,6 @@ def ensure_state_dirs(repo_root: Path) -> Path:
     (base / "logs").mkdir(parents=True, exist_ok=True)
     (base / "worktrees").mkdir(parents=True, exist_ok=True)
 
-    # Keep repo working tree clean without touching tracked .gitignore
     exclude_file = repo_root / ".git" / "info" / "exclude"
     if exclude_file.exists():
         content = exclude_file.read_text(encoding="utf-8", errors="ignore")
@@ -111,7 +173,6 @@ def pid_alive(pid: int | None) -> bool:
 
 def refresh_status(base: Path, w: dict) -> dict:
     if w.get("status") == "RUNNING" and not pid_alive(w.get("pid")):
-        # Runner exited unexpectedly before updating state
         w["status"] = "FAILED"
         w["pid"] = None
         w["last_error"] = w.get("last_error") or "runner process exited unexpectedly"
@@ -119,9 +180,19 @@ def refresh_status(base: Path, w: dict) -> dict:
     return w
 
 
+def init_session_id(base: Path, name: str, backend: str, turn: int = 0) -> str | None:
+    if backend == "pi":
+        suffix = f".t{turn}" if turn > 0 else ""
+        return str(base / "logs" / f"{name}{suffix}.pi.jsonl")
+    if backend == "claude":
+        return str(uuid.uuid4())
+    return None  # codex / agy / codebuddy assign session/conversation ID on first turn
+
+
 def build_agent_cmd(w: dict, prompt: str, is_resume: bool, last_msg_path: Path) -> list[str]:
     backend = w["backend"]
     model = w.get("model")
+    fallback_model = w.get("fallback_model")
     sid = w.get("session_id")
 
     if backend == "codex":
@@ -156,6 +227,8 @@ def build_agent_cmd(w: dict, prompt: str, is_resume: bool, last_msg_path: Path) 
         cmd = ["codebuddy", "-p", "--permission-mode", "acceptEdits", "--output-format", "stream-json"]
         if model:
             cmd += ["--model", model]
+        if fallback_model:
+            cmd += ["--fallback-model", fallback_model]
         if is_resume and sid:
             cmd += ["--resume", str(sid)]
         cmd.append(prompt)
@@ -200,7 +273,6 @@ def build_env() -> dict[str, str]:
     if parts:
         env["PATH"] = ":".join(parts) + (":" + current if current else "")
 
-    # Auto-load container proxy if configured and not yet set
     if env.get("RUNTIME_PROXY") == "true" and not env.get("http_proxy"):
         ip = env.get("PROXY_IP", "192.168.3.110")
         port = env.get("PROXY_PORT", "7890")
@@ -228,7 +300,6 @@ def extract_session_and_summary(backend: str, log_path: Path, last_msg_path: Pat
         except json.JSONDecodeError:
             continue
 
-        # Capture Codex thread_id or AGY conversation_id
         if backend in ("codex", "agy", "codebuddy") and not found_sid:
             for k in ("conversation_id", "conversationId", "thread_id", "session_id"):
                 if isinstance(obj.get(k), str) and obj[k]:
@@ -239,7 +310,6 @@ def extract_session_and_summary(backend: str, log_path: Path, last_msg_path: Pat
                 if isinstance(tid, str) and tid:
                     found_sid = tid
 
-        # Capture assistant text snippets for pi / gemini / claude
         for key in ("result", "text", "content", "message"):
             val = obj.get(key)
             if isinstance(val, str) and val.strip():
@@ -291,7 +361,7 @@ def cmd_internal_run(args: argparse.Namespace) -> None:
 
     env = build_env()
     with log_path.open("w", encoding="utf-8") as lf:
-        lf.write(f"# turn={turn} resume={is_resume} started={now_iso()}\n")
+        lf.write(f"# turn={turn} backend={w['backend']} model={w.get('model') or 'default'} resume={is_resume} started={now_iso()}\n")
         lf.write(f"# cmd={' '.join(cmd[:-1])} <prompt:{len(prompt)} chars>\n\n")
         lf.flush()
         proc = subprocess.Popen(
@@ -313,7 +383,7 @@ def cmd_internal_run(args: argparse.Namespace) -> None:
     w["last_summary"] = summary
     if rate_limited and rc != 0:
         w["status"] = "RATE_LIMITED"
-        w["last_error"] = "Detected rate limit / quota cap in output; switch backend or wait."
+        w["last_error"] = "Detected rate limit / quota cap in output; run 'aw handoff' to switch pool."
     elif rc == 0:
         w["status"] = "IDLE"
     else:
@@ -386,6 +456,45 @@ def path_allowed(path: str, patterns: list[str]) -> bool:
     return False
 
 
+def resolve_route(role: str | None, backend: str | None, model: str | None) -> tuple[str, str | None, str | None]:
+    routes = load_routes()
+    fallback_model = None
+    if role:
+        spec = routes.get(role)
+        if not spec:
+            sys.exit(f"Error: unknown role '{role}'. Available: {', '.join(routes.keys())}")
+        primary = spec["primary"]
+        if not backend:
+            backend = primary["backend"]
+            if not model:
+                model = primary.get("model")
+            fallback_model = primary.get("fallback_model")
+        elif backend == primary["backend"] and not model:
+            model = primary.get("model")
+            fallback_model = primary.get("fallback_model")
+    if not backend:
+        backend = "codex"
+    return backend, model, fallback_model
+
+
+def cmd_routes(_args: argparse.Namespace) -> None:
+    routes = load_routes()
+    print("=== Role Routing Table (Cost-per-Solved-Task Optimized) ===")
+    for role, spec in routes.items():
+        p = spec["primary"]
+        p_str = f"{p['backend']}/{p.get('model') or 'default'}"
+        if p.get("fallback_model"):
+            p_str += f" (auto-fb:{p['fallback_model']})"
+        fbs = " -> ".join(f"{fb['backend']}/{fb.get('model') or 'default'}" for fb in spec.get("fallbacks", []))
+        print(f"  {role:<6} : {p_str:<40} | handoff: {fbs}")
+        print(f"           {spec.get('desc', '')}")
+    print("\n=== Heterogeneous Cross-Review Defaults ===")
+    for author_backend, rev in DEFAULT_REVIEW_ROUTES.items():
+        if author_backend in ("codex", "agy", "codebuddy"):
+            print(f"  authored by {author_backend:<10} -> reviewed by {rev['backend']}/{rev['model']}")
+    print("\nOverride file (optional): ~/.config/aw/routes.json")
+
+
 def cmd_spawn(args: argparse.Namespace) -> None:
     repo_root = get_repo_root()
     base = ensure_state_dirs(repo_root)
@@ -395,11 +504,11 @@ def cmd_spawn(args: argparse.Namespace) -> None:
     if worker_file(base, name).exists():
         sys.exit(f"Error: worker '{name}' already exists. Use 'aw send {name}' or 'aw rm {name}'.")
 
+    backend, model, fallback_model = resolve_route(args.role, args.backend, args.model)
     base_branch = args.base or run_git(["rev-parse", "--abbrev-ref", "HEAD"], repo_root).stdout.strip()
     branch = f"agent/{name}"
     worktree = base / "worktrees" / name
 
-    # Ensure worktree & branch
     if worktree.exists():
         sys.exit(f"Error: worktree path already exists: {worktree}")
     branch_exists = run_git(["show-ref", "--verify", f"refs/heads/{branch}"], repo_root, check=False).returncode == 0
@@ -408,18 +517,15 @@ def cmd_spawn(args: argparse.Namespace) -> None:
     else:
         run_git(["worktree", "add", "-b", branch, str(worktree), base_branch], repo_root)
 
-    if args.backend == "pi":
-        session_id = str(base / "logs" / f"{name}.pi.jsonl")
-    elif args.backend == "claude":
-        session_id = str(uuid.uuid4())
-    else:
-        session_id = None  # codex assigns thread_id on first turn
-
+    session_id = init_session_id(base, name, backend)
     allowed = [p.strip() for p in (args.allow or "").split(",") if p.strip()]
     w = {
         "name": name,
-        "backend": args.backend,
-        "model": args.model,
+        "role": args.role or "custom",
+        "backend": backend,
+        "model": model,
+        "fallback_model": fallback_model,
+        "tried": [{"backend": backend, "model": model}],
         "base_branch": base_branch,
         "branch": branch,
         "worktree": str(worktree),
@@ -443,15 +549,16 @@ def cmd_spawn(args: argparse.Namespace) -> None:
     if args.prompt_file:
         prompt = Path(args.prompt_file).read_text(encoding="utf-8")
 
+    label = f"{backend}/{model or 'default'}"
     if prompt:
         pid = launch_runner(repo_root, base, name, 1, prompt, is_resume=False)
         w["status"] = "RUNNING"
         w["pid"] = pid
         w["turns"] = 1
         save_worker(base, w)
-        print(f"Spawned worker '{name}' ({args.backend}) in {worktree} [branch: {branch}] (pid={pid})")
+        print(f"Spawned worker '{name}' [role={w['role']}, {label}] in {worktree} (branch={branch}, pid={pid})")
     else:
-        print(f"Created idle worker '{name}' ({args.backend}) in {worktree} [branch: {branch}]")
+        print(f"Created idle worker '{name}' [role={w['role']}, {label}] in {worktree} (branch={branch})")
 
 
 def cmd_send(args: argparse.Namespace) -> None:
@@ -468,13 +575,167 @@ def cmd_send(args: argparse.Namespace) -> None:
         sys.exit("Error: prompt is required.")
 
     next_turn = int(w.get("turns", 0)) + 1
-    is_resume = next_turn > 1
+    is_resume = bool(w.get("session_id")) or (next_turn > 1 and not w.get("fresh_next_turn"))
+    w["fresh_next_turn"] = False
     pid = launch_runner(repo_root, base, w["name"], next_turn, prompt, is_resume=is_resume)
     w["status"] = "RUNNING"
     w["pid"] = pid
     w["turns"] = next_turn
     save_worker(base, w)
-    print(f"Sent turn {next_turn} to '{w['name']}' ({w['backend']}, resume={is_resume}, pid={pid})")
+    print(f"Sent turn {next_turn} to '{w['name']}' ({w['backend']}/{w.get('model') or 'default'}, resume={is_resume}, pid={pid})")
+
+
+def pick_next_fallback(w: dict) -> tuple[str, str | None, str | None]:
+    routes = load_routes()
+    role = w.get("role")
+    tried = {(t.get("backend"), t.get("model")) for t in (w.get("tried") or [])}
+    tried.add((w.get("backend"), w.get("model")))
+
+    candidates = []
+    if role in routes:
+        candidates.extend(routes[role].get("fallbacks", []))
+    candidates.extend([
+        {"backend": "codex", "model": "gpt-6.2-sol"},
+        {"backend": "agy", "model": "claude-sonnet-5-5-medium"},
+        {"backend": "codebuddy", "model": "deepseek-v4-pro"},
+    ])
+    for c in candidates:
+        key = (c["backend"], c.get("model"))
+        if key not in tried:
+            return c["backend"], c.get("model"), c.get("fallback_model")
+    sys.exit("Error: all fallback candidates already tried; pass -b <backend> -m <model> explicitly.")
+
+
+def cmd_handoff(args: argparse.Namespace) -> None:
+    repo_root = get_repo_root()
+    base = ensure_state_dirs(repo_root)
+    w = refresh_status(base, load_worker(base, args.name))
+    if w["status"] == "RUNNING":
+        sys.exit(f"Error: worker '{args.name}' is still RUNNING (pid={w.get('pid')}).")
+
+    old_label = f"{w['backend']}/{w.get('model') or 'default'}"
+    if args.backend:
+        new_backend = args.backend
+        new_model = args.model
+        new_fb = None
+    else:
+        new_backend, new_model, new_fb = pick_next_fallback(w)
+
+    wt = Path(w["worktree"])
+    diff_stat = run_git(["diff", "--stat", f"{w['base_branch']}...HEAD"], wt, check=False).stdout.strip()
+    wt_status = run_git(["status", "--short"], wt, check=False).stdout.strip()
+    next_turn = int(w.get("turns", 0)) + 1
+
+    handoff_prompt = (
+        f"You are taking over an existing task in this git worktree (branch `{w['branch']}`) "
+        f"from previous agent `{old_label}`.\n"
+        f"- Allowed paths: {', '.join(w.get('allowed_paths') or ['(any)'])}\n"
+        f"- Verify command: {w.get('verify_cmd') or '(none)'}\n"
+        f"- Previous status: {w.get('status')} | Last error: {w.get('last_error') or 'none'}\n"
+        f"- Previous summary:\n{w.get('last_summary') or '(none)'}\n"
+        f"- Committed diff stat:\n{diff_stat or '(none)'}\n"
+        f"- Working tree status:\n{wt_status or '(clean)'}\n\n"
+    )
+    if args.prompt:
+        handoff_prompt += f"Additional instructions from leader:\n{args.prompt}\n"
+    else:
+        handoff_prompt += "Inspect the current workspace and docs/architecture.md (if present), finish the remaining work cleanly inside allowed paths, run the verify command, and commit your changes.\n"
+
+    w["backend"] = new_backend
+    w["model"] = new_model
+    w["fallback_model"] = new_fb
+    w["session_id"] = init_session_id(base, w["name"], new_backend, turn=next_turn)
+    tried = w.get("tried") or []
+    tried.append({"backend": new_backend, "model": new_model})
+    w["tried"] = tried
+    w["last_error"] = None
+
+    if args.dry_run:
+        w["status"] = "IDLE"
+        w["fresh_next_turn"] = True
+        save_worker(base, w)
+        print(f"Switched '{w['name']}' from {old_label} -> {new_backend}/{new_model or 'default'} (dry-run; not started)")
+        return
+
+    pid = launch_runner(repo_root, base, w["name"], next_turn, handoff_prompt, is_resume=False)
+    w["status"] = "RUNNING"
+    w["pid"] = pid
+    w["turns"] = next_turn
+    save_worker(base, w)
+    print(f"Handed off '{w['name']}': {old_label} -> {new_backend}/{new_model or 'default'} (same worktree & branch, turn={next_turn}, pid={pid})")
+
+
+def cmd_review(args: argparse.Namespace) -> None:
+    repo_root = get_repo_root()
+    base = ensure_state_dirs(repo_root)
+    w = refresh_status(base, load_worker(base, args.name))
+    if w["status"] == "RUNNING":
+        sys.exit(f"Error: worker '{args.name}' is still RUNNING.")
+
+    rev_spec = DEFAULT_REVIEW_ROUTES.get(w["backend"], {"backend": "codex", "model": "codex-auto-review"})
+    rev_backend = args.backend or rev_spec["backend"]
+    rev_model = args.model or (rev_spec.get("model") if not args.backend else None)
+
+    wt = Path(w["worktree"])
+    chk = run_check_for_worker(base, w)
+    diff_committed = run_git(["diff", f"{w['base_branch']}...HEAD"], wt, check=False).stdout
+    diff_uncommitted = run_git(["diff"], wt, check=False).stdout
+    combined_diff = (diff_committed + "\n" + diff_uncommitted).strip()
+    if not combined_diff:
+        print(f"No diff to review for '{w['name']}'.")
+        return
+
+    arch_excerpt = ""
+    for candidate in ("docs/architecture.md", "ARCHITECTURE.md", "DESIGN.md"):
+        p = wt / candidate
+        if p.exists():
+            arch_excerpt = f"\n--- {candidate} ---\n" + p.read_text(encoding="utf-8", errors="ignore")[:4000]
+            break
+
+    review_prompt = (
+        "You are an independent read-only code reviewer screening changes for a human architect.\n"
+        "Do NOT edit any files. Inspect the diff against the architecture/red-lines and reply concisely with:\n"
+        "1. Verdict: PASS or REJECT\n"
+        "2. Critical issues (logic bugs, cheated mocks, architecture/red-line violations, security risks)\n"
+        "3. Brief summary (2-3 bullets)\n\n"
+        f"Worker: {w['name']} (authored by {w['backend']}/{w.get('model') or 'default'})\n"
+        f"Hard-gate check: {'PASS' if chk['passed'] else 'FAIL'} | Violations: {chk['violations']} | Verify OK: {chk['verify_ok']}\n"
+        f"{arch_excerpt}\n\n"
+        f"--- GIT DIFF (truncated to 24000 chars) ---\n{combined_diff[:24000]}\n"
+    )
+
+    print(f"Running heterogeneous review for '{w['name']}' using {rev_backend}/{rev_model or 'default'}...")
+    env = build_env()
+    if rev_backend == "codex":
+        cmd = ["codex", "exec", "--sandbox", "read-only"]
+        if rev_model:
+            cmd += ["-m", rev_model]
+        cmd.append(review_prompt)
+    elif rev_backend == "agy":
+        cmd = ["agy", "-p", review_prompt, "--mode", "plan", "--output-format", "text"]
+        if rev_model:
+            cmd += ["--model", rev_model]
+    elif rev_backend == "codebuddy":
+        cmd = ["codebuddy", "-p", "--permission-mode", "plan", "--output-format", "text"]
+        if rev_model:
+            cmd += ["--model", rev_model]
+        cmd.append(review_prompt)
+    else:
+        sys.exit(f"Error: unsupported review backend '{rev_backend}'")
+
+    res = subprocess.run(cmd, cwd=str(wt), env=env, text=True, capture_output=True)
+    output = (res.stdout or "").strip() or (res.stderr or "").strip()
+    review_log = base / "logs" / f"{w['name']}.review.txt"
+    review_log.write_text(output + "\n", encoding="utf-8")
+    w["last_review"] = {
+        "reviewed_at": now_iso(),
+        "reviewer": f"{rev_backend}/{rev_model or 'default'}",
+        "exit_code": res.returncode,
+        "log": str(review_log),
+        "verdict": "REJECT" if re.search(r"\bREJECT\b", output) else ("PASS" if re.search(r"\bPASS\b", output) else "UNKNOWN"),
+    }
+    save_worker(base, w)
+    print(output)
 
 
 def list_all_workers(base: Path) -> list[dict]:
@@ -493,20 +754,20 @@ def cmd_ls(args: argparse.Namespace) -> None:
         print(json.dumps(workers, indent=2, ensure_ascii=False))
         return
     if not workers:
-        print("No workers yet. Use 'aw spawn <name> -b codex -p \"...\"' to start one.")
+        print("No workers yet. Use 'aw spawn <name> --role core -p \"...\"' to start one.")
         return
 
-    header = f"{'NAME':<14} {'BACKEND':<8} {'STATUS':<12} {'TURNS':<5} {'FILES':<5} {'VIOL':<4} {'BEAD':<10} {'BRANCH'}"
+    header = f"{'NAME':<13} {'ROLE':<6} {'BACKEND/MODEL':<26} {'STATUS':<12} {'T':<2} {'FILES':<5} {'VIOL':<4} {'BRANCH'}"
     print(header)
     print("-" * len(header))
     for w in workers:
         wt = Path(w["worktree"])
         files = changed_files(wt, w["base_branch"]) if wt.exists() else []
         viol = [f for f in files if not path_allowed(f, w.get("allowed_paths") or [])]
-        bead = w.get("bead_id") or "-"
+        bm = f"{w['backend']}/{w.get('model') or 'default'}"[:25]
         print(
-            f"{w['name']:<14} {w['backend']:<8} {w['status']:<12} "
-            f"{w.get('turns', 0):<5} {len(files):<5} {len(viol):<4} {bead:<10} {w['branch']}"
+            f"{w['name']:<13} {(w.get('role') or '-'):<6} {bm:<26} {w['status']:<12} "
+            f"{w.get('turns', 0):<2} {len(files):<5} {len(viol):<4} {w['branch']}"
         )
 
 
@@ -634,20 +895,24 @@ def cmd_report(args: argparse.Namespace) -> None:
         viol = chk["violations"] if chk else [f for f in files if not path_allowed(f, w.get("allowed_paths") or [])]
         sens = chk["sensitive_changes"] if chk else [f for f in files if Path(f).name in SENSITIVE_FILES]
         verify_ok = chk["verify_ok"] if chk else None
+        rev = w.get("last_review") or {}
+        rev_reject = rev.get("verdict") == "REJECT"
 
         is_exc = (
             w["status"] in ("FAILED", "RATE_LIMITED")
             or bool(viol)
             or bool(sens)
             or (verify_ok is False)
+            or rev_reject
         )
-        entry = (w, files, viol, sens, verify_ok)
+        entry = (w, files, viol, sens, verify_ok, rev)
         (exceptions if is_exc else clean).append(entry)
 
     if exceptions:
         print("## [!] Exceptions Requiring Your Attention")
-        for w, files, viol, sens, verify_ok in exceptions:
-            print(f"- **{w['name']}** (`{w['backend']}`, status=`{w['status']}`, files={len(files)}, branch=`{w['branch']}`)")
+        for w, files, viol, sens, verify_ok, rev in exceptions:
+            bm = f"{w['backend']}/{w.get('model') or 'default'}"
+            print(f"- **{w['name']}** (`{w.get('role', '-')}`, `{bm}`, status=`{w['status']}`, files={len(files)}, branch=`{w['branch']}`)")
             if w.get("last_error"):
                 print(f"  - Error: {w['last_error']}")
             if viol:
@@ -656,16 +921,20 @@ def cmd_report(args: argparse.Namespace) -> None:
                 print(f"  - Sensitive/contract files: {', '.join(sens)}")
             if verify_ok is False:
                 print(f"  - Verify FAILED: `{w.get('verify_cmd')}`")
+            if rev.get("verdict") == "REJECT":
+                print(f"  - Heterogeneous review REJECTED by `{rev.get('reviewer')}` (see {rev.get('log')})")
         print()
     else:
         print("## [OK] No Exceptions Detected\n")
 
     if clean:
         print("## [OK] Compliant Workers (Summary Only)")
-        for w, files, _, _, verify_ok in clean:
+        for w, files, _, _, verify_ok, rev in clean:
+            bm = f"{w['backend']}/{w.get('model') or 'default'}"
             v_str = "pass" if verify_ok is True else ("n/a" if verify_ok is None else "fail")
+            r_str = f", review={rev.get('verdict')}" if rev.get("verdict") else ""
             first_line = (w.get("last_summary") or "").splitlines()[0][:100] if w.get("last_summary") else "(no summary)"
-            print(f"- **{w['name']}** (`{w['backend']}`, status=`{w['status']}`, files={len(files)}, verify={v_str}) — {first_line}")
+            print(f"- **{w['name']}** (`{bm}`, status=`{w['status']}`, files={len(files)}, verify={v_str}{r_str}) — {first_line}")
 
 
 def cmd_merge(args: argparse.Namespace) -> None:
@@ -675,7 +944,6 @@ def cmd_merge(args: argparse.Namespace) -> None:
     if w["status"] == "RUNNING":
         sys.exit(f"Error: worker '{args.name}' is still RUNNING.")
 
-    # Auto-commit uncommitted work inside worker worktree if requested or clean check
     wt = Path(w["worktree"])
     wt_status = run_git(["status", "--porcelain"], wt).stdout.strip()
     if wt_status:
@@ -729,9 +997,13 @@ def main() -> None:
     p = argparse.ArgumentParser(prog="aw", description="Minimal persistent multi-agent worker orchestrator")
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    rt = sub.add_parser("routes", help="Show Cost-per-Solved-Task role routing table and fallback chains")
+    rt.set_defaults(func=cmd_routes)
+
     sp = sub.add_parser("spawn", help="Create worktree and spawn a persistent worker")
     sp.add_argument("name")
-    sp.add_argument("-b", "--backend", choices=["codex", "pi", "agy", "codebuddy", "claude"], default="codex")
+    sp.add_argument("--role", choices=["core", "ui", "crud", "test"], default=None, help="Auto-route backend/model by task role")
+    sp.add_argument("-b", "--backend", choices=["codex", "agy", "codebuddy", "pi", "claude"], default=None)
     sp.add_argument("-m", "--model", default=None)
     sp.add_argument("--allow", default="", help="Comma-separated allowed path prefixes/globs")
     sp.add_argument("--verify", default=None, help="Verification command to run in worktree")
@@ -746,6 +1018,20 @@ def main() -> None:
     sd.add_argument("prompt", nargs="?", default=None)
     sd.add_argument("-f", "--prompt-file", default=None)
     sd.set_defaults(func=cmd_send)
+
+    ho = sub.add_parser("handoff", help="Switch a worker to next fallback CLI/model on the SAME worktree & branch")
+    ho.add_argument("name")
+    ho.add_argument("-b", "--backend", choices=["codex", "agy", "codebuddy", "pi", "claude"], default=None)
+    ho.add_argument("-m", "--model", default=None)
+    ho.add_argument("-p", "--prompt", default=None, help="Additional handoff instructions")
+    ho.add_argument("--dry-run", action="store_true", help="Switch backend/model metadata without starting turn")
+    ho.set_defaults(func=cmd_handoff)
+
+    rv = sub.add_parser("review", help="Run read-only heterogeneous cross-review against docs/architecture.md")
+    rv.add_argument("name")
+    rv.add_argument("-b", "--backend", choices=["codex", "agy", "codebuddy"], default=None)
+    rv.add_argument("-m", "--model", default=None)
+    rv.set_defaults(func=cmd_review)
 
     ls = sub.add_parser("ls", help="List all workers and status")
     ls.add_argument("--json", action="store_true")

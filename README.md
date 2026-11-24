@@ -11,8 +11,8 @@
 | 基础镜像 | `debian:trixie-slim` |
 | 默认用户 | `agent`（UID `1000`，支持免密 `sudo`） |
 | 工作目录 | `/home/agent/workspace` |
-| Coding Agent CLIs | **Codex CLI**、**Pi Coding Agent**、**Claude Code**、**Antigravity CLI (`agy`)**、**CodeBuddy Code (`codebuddy`)** |
-| 轻量编排层（默认推荐） | **`aw`**（零依赖持久化 Worker 编排 CLI）+ **`bd`（Beads 任务账本）** + `leader-orchestrator` Skill |
+| Coding Agent CLIs | **Codex CLI**、**Antigravity CLI (`agy`)**、**CodeBuddy Code (`codebuddy`)**、**Pi Coding Agent**、**Claude Code** |
+| 轻量编排层（默认推荐） | **`aw`**（零依赖持久化 Worker 编排 + 角色路由 + 同分支接力 + 异构审查 CLI）+ **`bd`（Beads 任务账本）** + `leader-orchestrator` Skill |
 | 重型编排层（大并发备用） | **Gas Town (`gt`)** + **Dolt** + **tmux** |
 | 基础开发工具 | Git、ripgrep、jq、tmux、sqlite3、Python 3、fnm、Node.js、pnpm、Go、bubblewrap、build-essential |
 | 远程访问 | OpenSSH Server，默认宿主机端口 **`6666`** 映射到容器 `22` |
@@ -75,7 +75,7 @@ WORKSPACE_HOST_DIR=/path/to/your/workspace podman-compose --in-pod=0 up --build 
 podman exec -it agent-container-0.2.0-gastown bash -lc "gt-check"
 ```
 
-`gt-check` 会检查所有核心工具链、4 大 Agent CLI 版本，并确认 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` 均未设置（避免意外走按量付费 API 覆盖订阅登录态）。
+`gt-check` 会检查所有核心工具链、各 Agent CLI 版本，并确认 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` 均未设置（避免意外走按量付费 API 覆盖订阅登录态）。
 
 ### 5. SSH 登录与首次订阅认证
 
@@ -88,8 +88,7 @@ ssh -p 6666 -L 1455:127.0.0.1:1455 agent@<服务器IP>
 # 在容器内完成各 CLI 订阅登录（凭证保存在 Named Volume 中，重建镜像免重登）
 codex login
 agy          # 无头 SSH 下会打印 Google 授权链接，浏览器打开后粘贴授权码即可
-# 如需使用 Claude Code 原生二进制，首次可执行：
-# curl -fsSL https://claude.ai/install.sh | bash && claude
+codebuddy
 ```
 
 ---
@@ -100,6 +99,19 @@ agy          # 无头 SSH 下会打印 Google 授权链接，浏览器打开后�
 
 核心哲学：**人看不过来海量并发代码，只把控「事前技术路线与契约」+「事后例外简报」。**
 
+### 三驾马车任务路由（Cost per Solved Task & 5 小时额度分流）
+
+`aw` 内置了按任务角色自动路由的默认映射（可通过 `aw routes` 查看，或在 `~/.config/aw/routes.json` 随时覆盖）：
+
+| 任务角色 (`--role`) | 默认主力 (`backend / model`) | 适用场景 | 限频/卡死一键接力链 (`aw handoff`) |
+| --- | --- | --- | --- |
+| `core` | `codex` / `gpt-6.2-sol` | 核心业务、强类型后端/算法、疑难 Debug | `agy/claude-sonnet-5-5-medium` → `agy/claude-opus-5-5-medium` → `codebuddy/deepseek-v4-pro` |
+| `ui` | `agy` / `gemini-4-neon-medium` | 前端交互、跨多文件大上下文整合、文档 | `agy/claude-sonnet-5-5-medium` → `codebuddy/kimi-k3.1-pro` |
+| `crud` | `codebuddy` / `deepseek-v4-pro` (自动降级 `glm-5.3`) | 常规接口/表单/体力活（帮 Codex & AGY 省 5h 额度） | `codebuddy/glm-5.3` → `agy/gemini-3.8-flash-high` |
+| `test` | `codebuddy` / `glm-5.3-flash` (自动降级 `deepseek-v4.1-flash`) | 单元测试、边界用例、辅助脚本（极致低耗） | `agy/gemini-3.8-flash-medium` → `codex/gpt-6-luna` |
+
+- **异构交叉初筛（`aw review <name>`）**：绝不自己审自己——`codex` 写的代码由 `agy/gemini-3.8-flash-high` 初筛；`agy` / `codebuddy` 写的代码由 `codex/codex-auto-review` 初筛。
+
 ### 双模式设计（已内置为 `leader-orchestrator` Skill）
 
 1. **冷启动 / 大型重构（完整打磨模式）**
@@ -108,22 +120,24 @@ agy          # 无头 SSH 下会打印 Google 授权链接，浏览器打开后�
    - **冻结后停掉重型规划流程**，把 `docs/architecture.md` 和公共接口定义提交到主分支。
 
 2. **日常功能迭代（轻量增量模式）**
-   - `-1` 直接读取 `docs/architecture.md` 作为项目宪法，花 2 分钟给出本次 2~4 个 Worker 的任务切分表（每个任务明确 `--allow` 允许改动路径和 `--verify` 验收命令）。
-   - 用 `bd`（Beads）记录任务依赖，防 5 小时订阅限频断线丢进度。
-   - `-1` 通过内置 **`aw`** CLI 并发拉起持久化 `-2`（可跨 `codex` / `pi` / `agy` / `codebuddy` / `claude` 分摊各家 5 小时订阅额度）。
-   - `-2` 跑完后自动跑 **0 Token 硬门禁（`aw check`）**——越界改文件或测试失败时，`-1` 直接 `aw send` 在原上下文中要求返工，**绝不次抛重开**。
-   - 全部通过后运行 **`aw report --run-check`** 生成一屏**架构师例外简报**（合规全绿项折叠，只高亮越界、改依赖/契约、失败或限频项），你确认后一键 `aw merge`。
+   - `-1` 直接读取 `docs/architecture.md` 作为项目宪法，花 2 分钟给出本次 2~4 个 Worker 的任务切分表（每个任务明确 `--role`、`--allow` 允许改动路径和 `--verify` 验收命令）。
+   - 用 `bd`（Beads）记录任务依赖，`-1` 通过内置 **`aw`** CLI 并发拉起持久化 `-2`。
+   - `-2` 跑完后自动跑 **0 Token 硬门禁（`aw check`）**——越界改文件或测试失败时，`-1` 直接 `aw send` 原地返工；遇 5 小时限频或卡死时直接 `aw handoff` 同分支跨池接力。
+   - 全部通过后运行 **`aw report --run-check`** 生成一屏**架构师例外简报**（合规全绿项折叠，只高亮越界、改依赖/契约、审查不通过、失败或限频项），你确认后一键 `aw merge`。
 
 ### 轻量编排工具 `aw` 常用命令速查
 
 ```bash
-# 1. 创建独立 git worktree 并后台拉起持久化 Worker
-aw spawn core-impl -b codex \
+# 0. 查看当前生效的角色路由表与接力链
+aw routes
+
+# 1. 按角色自动路由创建独立 git worktree 并后台拉起持久化 Worker
+aw spawn core-impl --role core \
   --allow "src/core/" \
   --verify "pnpm test -- core" \
   -p "严格遵守 docs/architecture.md，实现核心模块并提交代码。"
 
-# 2. 查看所有并发 Worker 状态、轮次、改动文件与越界数
+# 2. 查看所有并发 Worker 状态、角色、模型、轮次、改动文件与越界数
 aw ls
 
 # 3. 等待任意一个（或全部）Worker 完成本轮
@@ -139,13 +153,19 @@ aw check core-impl
 # 6. 原地续聊纠偏（保留完整会话上下文，不重建）
 aw send core-impl "测试报错 xxx，请只在 src/core/ 内修复后重跑验证。"
 
-# 7. 生成一屏架构师例外简报
+# 7. 撞 5 小时限频或同模型卡死时，同分支一键交接给备选池下一模型
+aw handoff core-impl
+
+# 8. 触发异构只读代码初筛（对照 docs/architecture.md 查 diff）
+aw review core-impl
+
+# 9. 生成一屏架构师例外简报
 aw report --run-check
 
-# 8. 终审通过后合并回当前主分支并清理 worktree/分支
+# 10. 终审通过后合并回当前主分支并清理 worktree/分支
 aw merge core-impl --auto-commit --delete
 
-# 9. 放弃并清理某个 Worker
+# 11. 放弃并清理某个 Worker
 aw rm core-impl --force
 ```
 
@@ -167,7 +187,7 @@ gt up
 - **持久化 Named Volumes**（重建/升级镜像不丢失）：
   - `agent-codex` → `/home/agent/.codex`
   - `agent-claude` → `/home/agent/.claude`
-  - `agent-gemini` → `/home/agent/.gemini`
+  - `agent-gemini` → `/home/agent/.gemini`（同时持久化 `agy` 配置与登录态）
   - `agent-pi` → `/home/agent/.pi`
   - `agent-codebuddy` → `/home/agent/.codebuddy`
   - `agent-gastown` → `/home/agent/gt`
@@ -200,7 +220,7 @@ gt up
 ├── bashrc.sh                                       # 容器 Shell 环境、自动代理与 gt-check 自检
 └── home/                                           # 构建期复制到 /home/agent/
     ├── set-proxy.sh / unset-proxy.sh               # 代理开关脚本
-    ├── .local/bin/w                                # 零依赖持久化 Worker 编排 CLI
+    ├── .local/bin/w                                # 零依赖持久化 Worker 编排 CLI（软链为 /usr/local/bin/aw）
     ├── .local/share/templates/DESIGN.md            # 增量任务切分模板
     └── .agents/skills/leader-orchestrator/SKILL.md # 反重力 -1 Leader 工作流 Skill
 ```
