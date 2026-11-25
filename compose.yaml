@@ -27,7 +27,7 @@ services:
     restart: unless-stopped
 
     # 将容器用户映射到当前 Rootless Podman 用户（启动需加 --in-pod=0）
-    userns_mode: "keep-id:uid=1000,gid=1000"
+    userns_mode: "keep-id"
 
     # 资源护栏，防止并发编译或 Agent 失控拖垮宿主机
     mem_limit: 12g
@@ -63,8 +63,19 @@ services:
     stdin_open: true
     tty: true
 
-    # 启动 sshd 并常驻（方便 tmux 后台 7x24 运行与反重力 Remote-SSH 接入）
-    command: /bin/bash -c "sudo /usr/sbin/sshd && exec sleep infinity"
+    # 自动对齐宿主机 workspace 组权限（兼容宿主机非 1000 UID）并常驻 sshd
+    command:
+      - /bin/bash
+      - -c
+      - |
+        WS_GID=$$(stat -c %g /home/agent/workspace)
+        if [ "$$WS_GID" != "1000" ] && [ "$$WS_GID" != "0" ]; then
+          sudo groupadd -o -g "$$WS_GID" hostws 2>/dev/null || true
+          sudo usermod -aG "$$WS_GID" agent
+        fi
+        git config --global --add safe.directory '*'
+        sudo /usr/sbin/sshd
+        exec sleep infinity
 
 volumes:
   agent-codex:
