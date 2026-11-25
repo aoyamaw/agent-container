@@ -65,17 +65,17 @@ DEFAULT_ROUTES = {
     },
     "crud": {
         "desc": "Routine APIs, forms, glue code, boilerplate (saves Codex/AGY 5h quota)",
-        "primary": {"backend": "codebuddy", "model": "deepseek-v4-pro", "fallback_model": "glm-5.3"},
+        "primary": {"backend": "codebuddy", "model": "glm-5.3", "fallback_model": "kimi-k3.1-pro"},
         "fallbacks": [
-            {"backend": "codebuddy", "model": "glm-5.3"},
+            {"backend": "codebuddy", "model": "kimi-k3.1-pro"},
             {"backend": "agy", "model": "gemini-3.8-flash-high"},
         ],
     },
     "test": {
-        "desc": "Unit tests, edge cases, helper scripts (ultra-low cost)",
-        "primary": {"backend": "codebuddy", "model": "glm-5.3-flash", "fallback_model": "deepseek-v4.1-flash"},
+        "desc": "Unit tests, edge cases, helper scripts (fast & low cost)",
+        "primary": {"backend": "agy", "model": "gemini-3.8-flash-high"},
         "fallbacks": [
-            {"backend": "agy", "model": "gemini-3.8-flash-medium"},
+            {"backend": "codebuddy", "model": "glm-5.3"},
             {"backend": "codex", "model": "gpt-6-luna"},
         ],
     },
@@ -197,12 +197,12 @@ def build_agent_cmd(w: dict, prompt: str, is_resume: bool, last_msg_path: Path) 
 
     if backend == "codex":
         if is_resume and sid:
-            cmd = ["codex", "exec", "resume", "--json", "--full-auto", "-o", str(last_msg_path)]
+            cmd = ["codex", "exec", "resume", "--json", "--dangerously-bypass-approvals-and-sandbox", "-o", str(last_msg_path)]
             if model:
                 cmd += ["-m", model]
             cmd += [sid, prompt]
             return cmd
-        cmd = ["codex", "exec", "--json", "--full-auto", "-o", str(last_msg_path)]
+        cmd = ["codex", "exec", "--json", "--dangerously-bypass-approvals-and-sandbox", "-o", str(last_msg_path)]
         if model:
             cmd += ["-m", model]
         cmd.append(prompt)
@@ -216,7 +216,7 @@ def build_agent_cmd(w: dict, prompt: str, is_resume: bool, last_msg_path: Path) 
         return cmd
 
     if backend == "agy":
-        cmd = ["agy", "-p", prompt, "--mode", "auto", "--output-format", "stream-json"]
+        cmd = ["agy", "-p", prompt, "--mode", "accept-edits", "--dangerously-skip-permissions", "--output-format", "stream-json"]
         if model:
             cmd += ["--model", model]
         if is_resume and sid:
@@ -224,7 +224,7 @@ def build_agent_cmd(w: dict, prompt: str, is_resume: bool, last_msg_path: Path) 
         return cmd
 
     if backend == "codebuddy":
-        cmd = ["codebuddy", "-p", "--permission-mode", "acceptEdits", "--output-format", "stream-json"]
+        cmd = ["codebuddy", "-p", "--permission-mode", "bypassPermissions", "--output-format", "stream-json"]
         if model:
             cmd += ["--model", model]
         if fallback_model:
@@ -282,6 +282,7 @@ def build_env() -> dict[str, str]:
         env["all_proxy"] = env["ALL_PROXY"] = f"socks5h://{ip}:{port}"
         no_proxy = "localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.cluster.local,.tsinghua.edu.cn,.ustc.edu.cn,.bfsu.edu.cn,.sjtu.edu.cn,.nju.edu.cn,.npmmirror.com,.taobao.org,.aliyun.com,.aliyuncs.com,.goproxy.cn,.goproxy.io,.daocloud.io,.rsproxy.cn,.huaweicloud.com,.tencent.com,.tencentcloudapi.com,.myqcloud.com,.codebuddy.cn,.deepseek.com,.bigmodel.cn,.moonshot.cn"
         env["no_proxy"] = env["NO_PROXY"] = no_proxy
+    env.setdefault("CODEBUDDY_IS_SANDBOX", "1")
     return env
 
 
@@ -309,24 +310,32 @@ def extract_session_and_summary(backend: str, log_path: Path, last_msg_path: Pat
                 tid = obj["thread"].get("id")
                 if isinstance(tid, str) and tid:
                     found_sid = tid
+            if not found_sid and isinstance(obj.get("result"), dict):
+                for k in ("conversation_id", "conversationId", "session_id"):
+                    if isinstance(obj["result"].get(k), str) and obj["result"][k]:
+                        found_sid = obj["result"][k]
+                        break
 
         for key in ("result", "text", "content", "message"):
             val = obj.get(key)
             if isinstance(val, str) and val.strip():
                 last_text = val.strip()
             elif isinstance(val, dict):
-                c = val.get("content")
-                if isinstance(c, str) and c.strip():
-                    last_text = c.strip()
-                elif isinstance(c, list):
-                    chunks = [
-                        item.get("text", "")
-                        for item in c
-                        if isinstance(item, dict) and isinstance(item.get("text"), str)
-                    ]
-                    joined = "".join(chunks).strip()
-                    if joined:
-                        last_text = joined
+                for subk in ("content", "response", "text"):
+                    c = val.get(subk)
+                    if isinstance(c, str) and c.strip():
+                        last_text = c.strip()
+                        break
+                    elif isinstance(c, list):
+                        chunks = [
+                            item.get("text", "")
+                            for item in c
+                            if isinstance(item, dict) and isinstance(item.get("text"), str)
+                        ]
+                        joined = "".join(chunks).strip()
+                        if joined:
+                            last_text = joined
+                            break
 
     if last_msg_path.exists():
         raw = last_msg_path.read_text(encoding="utf-8", errors="ignore").strip()
@@ -360,9 +369,12 @@ def cmd_internal_run(args: argparse.Namespace) -> None:
     save_worker(base, w)
 
     env = build_env()
+    turn_timeout = int(os.environ.get("AW_TURN_TIMEOUT", "420"))
+    timed_out = False
+    safe_cmd = [f"<prompt:{len(prompt)} chars>" if c == prompt else c for c in cmd]
     with log_path.open("w", encoding="utf-8") as lf:
         lf.write(f"# turn={turn} backend={w['backend']} model={w.get('model') or 'default'} resume={is_resume} started={now_iso()}\n")
-        lf.write(f"# cmd={' '.join(cmd[:-1])} <prompt:{len(prompt)} chars>\n\n")
+        lf.write(f"# cmd={' '.join(safe_cmd)}\n\n")
         lf.flush()
         proc = subprocess.Popen(
             cmd,
@@ -372,7 +384,18 @@ def cmd_internal_run(args: argparse.Namespace) -> None:
             stderr=subprocess.STDOUT,
             text=True,
         )
-        rc = proc.wait()
+        try:
+            rc = proc.wait(timeout=turn_timeout if turn_timeout > 0 else None)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+            lf.write(f"\n# [aw] turn timed out after {turn_timeout}s\n")
+            rc = 124
 
     found_sid, summary, rate_limited = extract_session_and_summary(w["backend"], log_path, last_msg_path)
     if found_sid and not w.get("session_id"):
@@ -381,7 +404,10 @@ def cmd_internal_run(args: argparse.Namespace) -> None:
     w["pid"] = None
     w["last_exit_code"] = rc
     w["last_summary"] = summary
-    if rate_limited and rc != 0:
+    if timed_out:
+        w["status"] = "FAILED"
+        w["last_error"] = f"turn timed out after {turn_timeout}s"
+    elif rate_limited and rc != 0:
         w["status"] = "RATE_LIMITED"
         w["last_error"] = "Detected rate limit / quota cap in output; run 'aw handoff' to switch pool."
     elif rc == 0:
@@ -427,7 +453,7 @@ def changed_files(worktree: Path, base_branch: str) -> list[str]:
     r1 = run_git(["diff", "--name-only", f"{base_branch}...HEAD"], worktree, check=False)
     if r1.returncode == 0:
         files.update(line.strip() for line in r1.stdout.splitlines() if line.strip())
-    r2 = run_git(["status", "--porcelain"], worktree, check=False)
+    r2 = run_git(["status", "--porcelain", "-uall"], worktree, check=False)
     if r2.returncode == 0:
         for line in r2.stdout.splitlines():
             if len(line) > 3:
@@ -694,7 +720,8 @@ def cmd_review(args: argparse.Namespace) -> None:
 
     review_prompt = (
         "You are an independent read-only code reviewer screening changes for a human architect.\n"
-        "Do NOT edit any files. Inspect the diff against the architecture/red-lines and reply concisely with:\n"
+        "Do NOT edit any files and do NOT run shell commands — all needed architecture context and the full git diff are provided below.\n"
+        "Inspect the diff against the architecture/red-lines and reply concisely with:\n"
         "1. Verdict: PASS or REJECT\n"
         "2. Critical issues (logic bugs, cheated mocks, architecture/red-line violations, security risks)\n"
         "3. Brief summary (2-3 bullets)\n\n"
@@ -736,6 +763,9 @@ def cmd_review(args: argparse.Namespace) -> None:
     }
     save_worker(base, w)
     print(output)
+    verdict = w["last_review"]["verdict"]
+    if res.returncode != 0 or verdict == "UNKNOWN":
+        sys.exit(res.returncode if res.returncode != 0 else 2)
 
 
 def list_all_workers(base: Path) -> list[dict]:

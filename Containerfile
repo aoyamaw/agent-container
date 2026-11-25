@@ -80,7 +80,7 @@ RUN mkdir -p /home/agent/.codex /home/agent/.claude /home/agent/.gemini /home/ag
     && chown -R agent:agent /home/agent
 
 COPY --chown=agent:agent home/ /home/agent/
-RUN chmod +x /home/agent/.local/bin/w /home/agent/.local/bin/entrypoint.sh && ln -sf /home/agent/.local/bin/w /usr/local/bin/aw && mkdir -p /home/agent/.gemini/config/skills/leader-orchestrator && cp /home/agent/.agents/skills/leader-orchestrator/SKILL.md /home/agent/.gemini/config/skills/leader-orchestrator/SKILL.md && chown -R agent:agent /home/agent/.gemini/config
+RUN chmod +x /home/agent/.local/bin/w /home/agent/.local/bin/gt-check /home/agent/.local/bin/entrypoint.sh && ln -sf /home/agent/.local/bin/w /usr/local/bin/aw && ln -sf /home/agent/.local/bin/gt-check /usr/local/bin/gt-check && mkdir -p /home/agent/.gemini/config/skills/leader-orchestrator && cp /home/agent/.agents/skills/leader-orchestrator/SKILL.md /home/agent/.gemini/config/skills/leader-orchestrator/SKILL.md && chown -R agent:agent /home/agent/.gemini/config
 COPY bashrc.sh /tmp/agent-bashrc
 RUN printf '\n' >> /home/agent/.bashrc \
     && cat /tmp/agent-bashrc >> /home/agent/.bashrc \
@@ -128,7 +128,7 @@ RUN set -eu; \
         npm config set registry https://registry.npmmirror.com; \
         export COREPACK_NPM_REGISTRY=https://registry.npmmirror.com; \
     fi; \
-    npm install --global corepack@latest; \
+    npm install --global corepack@latest typescript @types/node; \
     corepack enable pnpm; \
     corepack prepare "pnpm@$PNPM_VERSION" --activate; \
     if [ "$USE_CHINA_NPM_MIRROR" = "true" ]; then \
@@ -179,6 +179,7 @@ RUN set -eu; \
     mkdir -p "$GOPATH/bin"; \
     CGO_ENABLED=1 go install "github.com/steveyegge/beads/cmd/bd@${BEADS_VERSION}"; \
     CGO_ENABLED=1 go install "github.com/steveyegge/gastown/cmd/gt@${GASTOWN_VERSION}"; \
+    bd metrics off || true; \
     if [ "$USE_PROXY" = "true" ]; then \
         export PROXY_IP PROXY_PORT PROXY_USER PROXY_PASS; \
         . "$HOME/set-proxy.sh"; \

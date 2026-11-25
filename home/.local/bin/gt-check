@@ -1,0 +1,58 @@
+#!/bin/bash
+set -u
+
+echo "=== Core Toolchain ==="
+for entry in "aw:--help" "go:version" "dolt:version" "bd:version" "gt:--version" "tmux:-V" "git:--version" "node:--version" "pnpm:--version" "tsc:--version"; do
+  cmd="${entry%%:*}"
+  flag="${entry#*:}"
+  if command -v "$cmd" >/dev/null 2>&1; then
+    printf "  %-10s: %s\n" "$cmd" "$("$cmd" "$flag" 2>&1 | head -n 1)"
+  else
+    printf "  %-10s: MISSING\n" "$cmd"
+  fi
+done
+
+echo "=== Coding Agent CLIs & Login State ==="
+check_login() {
+  local name="$1"
+  shift
+  for p in "$@"; do
+    if [ -e "$p" ]; then
+      echo "logged-in"
+      return
+    fi
+  done
+  echo "not-logged-in"
+}
+
+for cmd in codex agy codebuddy pi claude; do
+  if command -v "$cmd" >/dev/null 2>&1; then
+    ver="$("$cmd" --version 2>&1 | head -n 1)"
+    case "$cmd" in
+      codex)     state="$(check_login codex "$HOME/.codex/auth.json")" ;;
+      agy)       state="$(check_login agy "$HOME/.gemini/antigravity-cli" "$HOME/.gemini/google_accounts.json")" ;;
+      codebuddy) state="$(check_login codebuddy "$HOME/.codebuddy/local_storage" "$HOME/.codebuddy/settings.json")" ;;
+      *)         state="optional" ;;
+    esac
+    printf "  %-10s: %-26s [%s]\n" "$cmd" "$ver" "$state"
+  else
+    printf "  %-10s: MISSING\n" "$cmd"
+  fi
+done
+
+echo "=== Subscription Safety Check (No API Key Leakage) ==="
+fail=0
+for key in OPENAI_API_KEY ANTHROPIC_API_KEY GEMINI_API_KEY; do
+  if [ -n "${!key:-}" ]; then
+    echo "  [WARN] $key is set (may override subscription login!)"
+    fail=1
+  else
+    echo "  [OK]   $key is unset"
+  fi
+done
+
+echo "=== Proxy Check ==="
+printf "  http_proxy = %s\n" "${http_proxy:-(unset)}"
+printf "  no_proxy   = %s\n" "${no_proxy:-(unset)}"
+
+exit "$fail"

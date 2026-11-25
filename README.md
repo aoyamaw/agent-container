@@ -107,8 +107,8 @@ codebuddy
 | --- | --- | --- | --- |
 | `core` | `codex` / `gpt-6.2-sol` | 核心业务、强类型后端/算法、疑难 Debug | `agy/claude-sonnet-5-5-medium` → `agy/claude-opus-5-5-medium` → `codebuddy/deepseek-v4-pro` |
 | `ui` | `agy` / `gemini-4-neon-medium` | 前端交互、跨多文件大上下文整合、文档 | `agy/claude-sonnet-5-5-medium` → `codebuddy/kimi-k3.1-pro` |
-| `crud` | `codebuddy` / `deepseek-v4-pro` (自动降级 `glm-5.3`) | 常规接口/表单/体力活（帮 Codex & AGY 省 5h 额度） | `codebuddy/glm-5.3` → `agy/gemini-3.8-flash-high` |
-| `test` | `codebuddy` / `glm-5.3-flash` (自动降级 `deepseek-v4.1-flash`) | 单元测试、边界用例、辅助脚本（极致低耗） | `agy/gemini-3.8-flash-medium` → `codex/gpt-6-luna` |
+| `crud` | `codebuddy` / `glm-5.3` (自动降级 `kimi-k3.1-pro`) | 常规接口/表单/体力活（帮 Codex & AGY 省 5h 额度） | `codebuddy/kimi-k3.1-pro` → `agy/gemini-3.8-flash-high` |
+| `test` | `agy` / `gemini-3.8-flash-high` | 单元测试、边界用例、辅助脚本（极速低耗） | `codebuddy/glm-5.3` → `codex/gpt-6-luna` |
 
 - **异构交叉初筛（`aw review <name>`）**：绝不自己审自己——`codex` 写的代码由 `agy/gemini-3.8-flash-high` 初筛；`agy` / `codebuddy` 写的代码由 `codex/codex-auto-review` 初筛。
 

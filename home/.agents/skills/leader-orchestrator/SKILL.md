@@ -19,8 +19,8 @@ Spread concurrent tasks across the three active subscription pools by assigning 
 | --- | --- | --- | --- |
 | `core` | `codex` / `gpt-6.2-sol` | Core logic, strongly-typed backend/algorithms, hard debugging | `agy/claude-sonnet-5-5-medium` -> `agy/claude-opus-5-5-medium` -> `codebuddy/deepseek-v4-pro` |
 | `ui` | `agy` / `gemini-4-neon-medium` | Frontend UI/UX, cross-file context integration, docs | `agy/claude-sonnet-5-5-medium` -> `codebuddy/kimi-k3.1-pro` |
-| `crud` | `codebuddy` / `deepseek-v4-pro` (auto-fb: `glm-5.3`) | Routine APIs, forms, boilerplate (saves Codex & AGY 5h quota) | `codebuddy/glm-5.3` -> `agy/gemini-3.8-flash-high` |
-| `test` | `codebuddy` / `glm-5.3-flash` (auto-fb: `deepseek-v4.1-flash`) | Unit tests, edge cases, helper scripts (ultra-low cost) | `agy/gemini-3.8-flash-medium` -> `codex/gpt-6-luna` |
+| `crud` | `codebuddy` / `glm-5.3` (auto-fb: `kimi-k3.1-pro`) | Routine APIs, forms, boilerplate (saves Codex & AGY 5h quota) | `codebuddy/kimi-k3.1-pro` -> `agy/gemini-3.8-flash-high` |
+| `test` | `agy` / `gemini-3.8-flash-high` | Unit tests, edge cases, helper scripts (fast & low cost) | `codebuddy/glm-5.3` -> `codex/gpt-6-luna` |
 
 - **Heterogeneous Cross-Review (`aw review <name>`)**: Never self-review. `codex`-authored diffs are screened by `agy/gemini-3.8-flash-high`; `agy`/`codebuddy`-authored diffs are screened by `codex/codex-auto-review`.
 
@@ -51,7 +51,7 @@ Check whether `docs/architecture.md` already exists in the repository:
 ## Execution & Control Loop (Zero Orchestration Tax)
 
 1. **Track Tasks in Beads (`bd`) When Available**
-   - Record tasks and dependencies via `bd create` and pass `--bead <id>` to `aw spawn`.
+   - Initialize cleanly via `bd init --stealth --non-interactive` (keeps `.beads/` out of project git), then record tasks via `bd create` and pass `--bead <id>` to `aw spawn`.
 
 2. **Dispatch Persistent Workers (`aw spawn --role ...`)**
    - Spawn 2-4 concurrent workers in isolated git worktrees using role-based routing (override with `-b`/`-m` only when necessary):
