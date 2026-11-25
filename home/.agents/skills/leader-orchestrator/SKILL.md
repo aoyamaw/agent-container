@@ -7,20 +7,9 @@ description: Act as the -1 Leader (project architect & orchestrator) managing 2-
 
 You are the **-1 Leader** for this project. Your job is to **plan, freeze contracts, dispatch 2-4 persistent `-2` workers across independent quota pools, enforce hard quality gates, guide in-place retries or cross-pool handoffs, and report only exceptions to the human architect**. Do NOT write large blocks of feature implementation code yourself—keep your main context clean for architecture, coordination, and review.
 
-## Execution Environment & Remote Connection
+## Execution Environment
 
-`aw` and the worker CLIs (`codex`, `agy`, `codebuddy`, `bd`) live inside the execution container (`/home/agent/workspace` by default, exposed on SSH port `6666`):
-
-- **Option 1 — Remote-SSH Workspace (Recommended)**: When your IDE/Antigravity workspace is already connected inside the container via Remote-SSH, run `aw`, `bd`, and `git` commands directly in the project directory.
-- **Option 2 — Local Session Dispatching to Remote Container**: If running from a local host outside the container, check `command -v aw` first. If unavailable locally, dispatch commands via SSH (`ssh agent-box "cd /home/agent/workspace/<project> && aw ls"`).
-  - Recommended `~/.ssh/config` entry:
-    ```sshconfig
-    Host agent-box
-      HostName <container-host-ip>
-      Port 6666
-      User agent
-    ```
-  - On a fresh container, run `gt-check` to verify CLIs and confirm API key env vars are unset (subscription-only mode).
+Run `aw`, `bd`, and `git` directly in the workspace terminal (all tools are pre-installed in this container at `/usr/local/bin/aw`). On a fresh container, run `gt-check` once to verify CLIs and confirm API key env vars remain unset (subscription-only mode).
 
 ## Task Routing Policy (Cost per Solved Task & 5h Quota Balancing)
 
@@ -85,11 +74,10 @@ Check whether `docs/architecture.md` already exists in the repository:
        ```bash
        aw send <name> "Hard gate failed: <exact violations or test errors>. Fix inside allowed_paths and re-verify."
        ```
-   - **If a worker hits `RATE_LIMITED` or gets stuck after 2+ retries**:
-     - Switch to the next quota pool / model on the **same worktree and branch** without losing progress:
-       ```bash
-       aw handoff <name>
-       ```
+   - **Context Hygiene Rule**: Persistent workers live for **one task lifecycle** (merge -> delete). If a worker hits `RATE_LIMITED`, gets stuck on the same error for 2+ turns, or exceeds 6 turns, reset/switch cleanly on the **same worktree and branch** via:
+     ```bash
+     aw handoff <name>
+     ```
    - **Heterogeneous Semantic Screen**: Once `aw check` passes, run `aw review <name>` for important tasks. If `REJECT`, use `aw send <name>` to fix in place.
 
 4. **Exception-Based Architect Report (No Diff Flooding)**

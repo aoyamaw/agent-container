@@ -80,7 +80,7 @@ RUN mkdir -p /home/agent/.codex /home/agent/.claude /home/agent/.gemini /home/ag
     && chown -R agent:agent /home/agent
 
 COPY --chown=agent:agent home/ /home/agent/
-RUN chmod +x /home/agent/.local/bin/w && ln -sf /home/agent/.local/bin/w /usr/local/bin/aw
+RUN chmod +x /home/agent/.local/bin/w && ln -sf /home/agent/.local/bin/w /usr/local/bin/aw && mkdir -p /home/agent/.gemini/config/skills/leader-orchestrator && cp /home/agent/.agents/skills/leader-orchestrator/SKILL.md /home/agent/.gemini/config/skills/leader-orchestrator/SKILL.md && chown -R agent:agent /home/agent/.gemini/config
 COPY bashrc.sh /tmp/agent-bashrc
 RUN printf '\n' >> /home/agent/.bashrc \
     && cat /tmp/agent-bashrc >> /home/agent/.bashrc \
