@@ -26,9 +26,6 @@ services:
     init: true
     restart: unless-stopped
 
-    # 将容器用户映射到当前 Rootless Podman 用户（启动需加 --in-pod=0）
-    userns_mode: "keep-id"
-
     # 资源护栏，防止并发编译或 Agent 失控拖垮宿主机
     mem_limit: 12g
     cpus: 6
@@ -63,19 +60,8 @@ services:
     stdin_open: true
     tty: true
 
-    # 自动对齐宿主机 workspace 组权限（兼容宿主机非 1000 UID）并常驻 sshd
-    command:
-      - /bin/bash
-      - -c
-      - |
-        WS_GID=$$(stat -c %g /home/agent/workspace)
-        if [ "$$WS_GID" != "1000" ] && [ "$$WS_GID" != "0" ]; then
-          sudo groupadd -o -g "$$WS_GID" hostws 2>/dev/null || true
-          sudo usermod -aG "$$WS_GID" agent
-        fi
-        git config --global --add safe.directory '*'
-        sudo /usr/sbin/sshd
-        exec sleep infinity
+    # 自动配置 git safe.directory 并常驻 sshd（无需 keep-id，0.5 秒瞬启）
+    command: /bin/bash -c "git config --global --add safe.directory '*' && sudo /usr/sbin/sshd && exec sleep infinity"
 
 volumes:
   agent-codex:
