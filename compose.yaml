@@ -27,7 +27,7 @@ services:
     restart: unless-stopped
 
     # 将容器用户映射到当前 Rootless Podman 用户（启动需加 --in-pod=0）
-    userns_mode: "keep-id"
+    userns_mode: "keep-id:uid=1000,gid=1000"
 
     # 资源护栏，防止并发编译或 Agent 失控拖垮宿主机
     mem_limit: 12g
