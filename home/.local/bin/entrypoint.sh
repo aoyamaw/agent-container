@@ -16,7 +16,7 @@ BASE_PATH="/home/agent/.local/share/fnm:/home/agent/.local/share/fnm/aliases/def
     fi
     HTTP_URL="http://${PROXY_AUTH}${PROXY_IP}:${PROXY_PORT}"
     SOCKS_URL="socks5h://${PROXY_AUTH}${PROXY_IP}:${PROXY_PORT}"
-    NO_P="localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.cluster.local"
+    NO_P="localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.cluster.local,.tsinghua.edu.cn,.ustc.edu.cn,.bfsu.edu.cn,.sjtu.edu.cn,.nju.edu.cn,.npmmirror.com,.taobao.org,.aliyun.com,.aliyuncs.com,.goproxy.cn,.goproxy.io,.daocloud.io,.rsproxy.cn,.huaweicloud.com,.tencent.com,.tencentcloudapi.com,.myqcloud.com,.codebuddy.cn,.deepseek.com,.bigmodel.cn,.moonshot.cn"
     echo "http_proxy=\"${HTTP_URL}\""
     echo "https_proxy=\"${HTTP_URL}\""
     echo "all_proxy=\"${SOCKS_URL}\""

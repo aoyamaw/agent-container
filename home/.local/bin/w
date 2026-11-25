@@ -280,7 +280,7 @@ def build_env() -> dict[str, str]:
         env["http_proxy"] = env["HTTP_PROXY"] = proxy
         env["https_proxy"] = env["HTTPS_PROXY"] = proxy
         env["all_proxy"] = env["ALL_PROXY"] = f"socks5h://{ip}:{port}"
-        no_proxy = "localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+        no_proxy = "localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.cluster.local,.tsinghua.edu.cn,.ustc.edu.cn,.bfsu.edu.cn,.sjtu.edu.cn,.nju.edu.cn,.npmmirror.com,.taobao.org,.aliyun.com,.aliyuncs.com,.goproxy.cn,.goproxy.io,.daocloud.io,.rsproxy.cn,.huaweicloud.com,.tencent.com,.tencentcloudapi.com,.myqcloud.com,.codebuddy.cn,.deepseek.com,.bigmodel.cn,.moonshot.cn"
         env["no_proxy"] = env["NO_PROXY"] = no_proxy
     return env
 

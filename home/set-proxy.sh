@@ -26,7 +26,7 @@ export https_proxy="http://${PROXY_AUTH}${PROXY_IP}:${PROXY_PORT}"
 export all_proxy="socks5h://${PROXY_AUTH}${PROXY_IP}:${PROXY_PORT}"
 
 # 本地、私有网络和 Kubernetes 集群地址不使用代理
-export no_proxy="localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.cluster.local"
+export no_proxy="localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.cluster.local,.tsinghua.edu.cn,.ustc.edu.cn,.bfsu.edu.cn,.sjtu.edu.cn,.nju.edu.cn,.npmmirror.com,.taobao.org,.aliyun.com,.aliyuncs.com,.goproxy.cn,.goproxy.io,.daocloud.io,.rsproxy.cn,.huaweicloud.com,.tencent.com,.tencentcloudapi.com,.myqcloud.com,.codebuddy.cn,.deepseek.com,.bigmodel.cn,.moonshot.cn"
 
 # 同时设置大写形式（部分传统软件或 Java 程序需要大写环境变量）
 export HTTP_PROXY="$http_proxy"
