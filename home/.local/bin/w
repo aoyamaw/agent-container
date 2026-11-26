@@ -383,16 +383,23 @@ def cmd_internal_run(args: argparse.Namespace) -> None:
             stdout=lf,
             stderr=subprocess.STDOUT,
             text=True,
+            start_new_session=True,
         )
         try:
             rc = proc.wait(timeout=turn_timeout if turn_timeout > 0 else None)
         except subprocess.TimeoutExpired:
             timed_out = True
-            proc.terminate()
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except OSError:
+                proc.terminate()
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except OSError:
+                    proc.kill()
                 proc.wait()
             lf.write(f"\n# [aw] turn timed out after {turn_timeout}s\n")
             rc = 124
@@ -521,6 +528,89 @@ def cmd_routes(_args: argparse.Namespace) -> None:
     print("\nOverride file (optional): ~/.config/aw/routes.json")
 
 
+def load_repo_config(repo_root: Path) -> dict:
+    cfg_path = repo_root / ".aw.json"
+    if not cfg_path.exists():
+        return {}
+    try:
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        print(f"[warn] failed to load {cfg_path}: {e}", file=sys.stderr)
+        return {}
+
+
+def is_gitignored(repo_root: Path, rel_path: str) -> bool:
+    return run_git(["check-ignore", "-q", rel_path], repo_root, check=False).returncode == 0
+
+
+def bootstrap_worktree(repo_root: Path, worktree: Path, setup_override: str | None, no_auto_deps: bool) -> None:
+    cfg = load_repo_config(repo_root)
+    setup_cmd = setup_override if setup_override is not None else cfg.get("setup_cmd")
+
+    for rel in cfg.get("copy_files") or []:
+        src = repo_root / rel
+        dst = worktree / rel
+        if src.exists() and not dst.exists():
+            if not is_gitignored(repo_root, rel):
+                print(f"[warn] copy_files entry '{rel}' is not gitignored; it may appear in git status.", file=sys.stderr)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if src.is_dir():
+                shutil.copytree(src, dst)
+            else:
+                shutil.copy2(src, dst)
+
+    symlink_paths = list(cfg.get("symlink_paths") or [])
+    auto_symlink = cfg.get("auto_symlink_deps", True) and not no_auto_deps and not setup_cmd
+    if auto_symlink and not symlink_paths:
+        for cand in ("node_modules", ".venv", "venv"):
+            if (repo_root / cand).exists() and is_gitignored(repo_root, cand):
+                symlink_paths.append(cand)
+
+    for rel in symlink_paths:
+        src = repo_root / rel
+        dst = worktree / rel
+        if src.exists() and not dst.exists():
+            if not is_gitignored(repo_root, rel):
+                print(f"[warn] skipping symlink for non-gitignored path '{rel}' to avoid polluting git diff.", file=sys.stderr)
+                continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.symlink_to(src)
+
+    if setup_cmd:
+        print(f"Running worktree setup: {setup_cmd}")
+        res = subprocess.run(
+            ["bash", "-lc", setup_cmd],
+            cwd=str(worktree),
+            env=build_env(),
+            text=True,
+            capture_output=True,
+        )
+        if res.returncode != 0:
+            tail = ((res.stdout or "") + "\n" + (res.stderr or "")).strip()[-1000:]
+            raise RuntimeError(f"worktree setup_cmd failed (exit={res.returncode}):\n{tail}")
+
+
+def sync_bead(repo_root: Path, bead_id: str | None, action: str, reason: str = "") -> None:
+    if not bead_id or not (repo_root / ".beads").exists():
+        return
+    if not shutil.which("bd"):
+        return
+    if action == "start":
+        cmd = ["bd", "update", bead_id, "--status", "in_progress"]
+    elif action == "close":
+        cmd = ["bd", "close", bead_id]
+        if reason:
+            cmd += ["--reason", reason]
+    else:
+        return
+    res = subprocess.run(cmd, cwd=str(repo_root), env=build_env(), text=True, capture_output=True)
+    if res.returncode != 0:
+        err = (res.stderr or res.stdout or "").strip().splitlines()
+        msg = err[-1] if err else f"exit={res.returncode}"
+        print(f"[warn] bd {action} {bead_id} failed: {msg}", file=sys.stderr)
+
+
 def cmd_spawn(args: argparse.Namespace) -> None:
     repo_root = get_repo_root()
     base = ensure_state_dirs(repo_root)
@@ -542,6 +632,14 @@ def cmd_spawn(args: argparse.Namespace) -> None:
         run_git(["worktree", "add", str(worktree), branch], repo_root)
     else:
         run_git(["worktree", "add", "-b", branch, str(worktree), base_branch], repo_root)
+
+    try:
+        bootstrap_worktree(repo_root, worktree, args.setup, args.no_auto_deps)
+    except Exception as e:
+        run_git(["worktree", "remove", "--force", str(worktree)], repo_root, check=False)
+        if not branch_exists:
+            run_git(["branch", "-D", branch], repo_root, check=False)
+        sys.exit(f"Error: {e}")
 
     session_id = init_session_id(base, name, backend)
     allowed = [p.strip() for p in (args.allow or "").split(",") if p.strip()]
@@ -570,6 +668,7 @@ def cmd_spawn(args: argparse.Namespace) -> None:
         "updated_at": now_iso(),
     }
     save_worker(base, w)
+    sync_bead(repo_root, args.bead, "start")
 
     prompt = args.prompt
     if args.prompt_file:
@@ -705,8 +804,25 @@ def cmd_review(args: argparse.Namespace) -> None:
     wt = Path(w["worktree"])
     chk = run_check_for_worker(base, w)
     diff_committed = run_git(["diff", f"{w['base_branch']}...HEAD"], wt, check=False).stdout
+    diff_staged = run_git(["diff", "--cached"], wt, check=False).stdout
     diff_uncommitted = run_git(["diff"], wt, check=False).stdout
-    combined_diff = (diff_committed + "\n" + diff_uncommitted).strip()
+    untracked_parts: list[str] = []
+    ut_res = run_git(["ls-files", "--others", "--exclude-standard"], wt, check=False)
+    if ut_res.returncode == 0:
+        for rel in [ln.strip() for ln in ut_res.stdout.splitlines() if ln.strip()]:
+            fp = wt / rel
+            if fp.is_file():
+                try:
+                    raw = fp.read_bytes()
+                    if b"\x00" in raw[:1024]:
+                        untracked_parts.append(f"--- /dev/null\n+++ b/{rel}\n[binary untracked file, {len(raw)} bytes]")
+                    else:
+                        txt = raw.decode("utf-8", errors="replace")[:4000]
+                        added = "\n".join("+" + l for l in txt.splitlines())
+                        untracked_parts.append(f"diff --git a/{rel} b/{rel}\nnew file (untracked)\n--- /dev/null\n+++ b/{rel}\n{added}")
+                except OSError:
+                    pass
+    combined_diff = "\n".join(p for p in (diff_committed, diff_staged, diff_uncommitted, "\n".join(untracked_parts)) if p.strip()).strip()
     if not combined_diff:
         print(f"No diff to review for '{w['name']}'.")
         return
@@ -750,22 +866,36 @@ def cmd_review(args: argparse.Namespace) -> None:
     else:
         sys.exit(f"Error: unsupported review backend '{rev_backend}'")
 
-    res = subprocess.run(cmd, cwd=str(wt), env=env, text=True, capture_output=True)
-    output = (res.stdout or "").strip() or (res.stderr or "").strip()
+    review_timeout = int(os.environ.get("AW_REVIEW_TIMEOUT", "240"))
+    try:
+        res = subprocess.run(
+            cmd,
+            cwd=str(wt),
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=review_timeout if review_timeout > 0 else None,
+        )
+        rc = res.returncode
+        output = (res.stdout or "").strip() or (res.stderr or "").strip()
+    except subprocess.TimeoutExpired:
+        rc = 124
+        output = f"[aw] review timed out after {review_timeout}s"
+
     review_log = base / "logs" / f"{w['name']}.review.txt"
     review_log.write_text(output + "\n", encoding="utf-8")
+    verdict = "REJECT" if re.search(r"\bREJECT\b", output) else ("PASS" if re.search(r"\bPASS\b", output) else "UNKNOWN")
     w["last_review"] = {
         "reviewed_at": now_iso(),
         "reviewer": f"{rev_backend}/{rev_model or 'default'}",
-        "exit_code": res.returncode,
+        "exit_code": rc,
         "log": str(review_log),
-        "verdict": "REJECT" if re.search(r"\bREJECT\b", output) else ("PASS" if re.search(r"\bPASS\b", output) else "UNKNOWN"),
+        "verdict": verdict,
     }
     save_worker(base, w)
     print(output)
-    verdict = w["last_review"]["verdict"]
-    if res.returncode != 0 or verdict == "UNKNOWN":
-        sys.exit(res.returncode if res.returncode != 0 else 2)
+    if rc != 0 or verdict == "UNKNOWN":
+        sys.exit(rc if rc != 0 else 2)
 
 
 def list_all_workers(base: Path) -> list[dict]:
@@ -787,7 +917,7 @@ def cmd_ls(args: argparse.Namespace) -> None:
         print("No workers yet. Use 'aw spawn <name> --role core -p \"...\"' to start one.")
         return
 
-    header = f"{'NAME':<13} {'ROLE':<6} {'BACKEND/MODEL':<26} {'STATUS':<12} {'T':<2} {'FILES':<5} {'VIOL':<4} {'BRANCH'}"
+    header = f"{'NAME':<13} {'ROLE':<6} {'BEAD':<9} {'BACKEND/MODEL':<26} {'STATUS':<12} {'T':<2} {'FILES':<5} {'VIOL':<4} {'BRANCH'}"
     print(header)
     print("-" * len(header))
     for w in workers:
@@ -795,8 +925,9 @@ def cmd_ls(args: argparse.Namespace) -> None:
         files = changed_files(wt, w["base_branch"]) if wt.exists() else []
         viol = [f for f in files if not path_allowed(f, w.get("allowed_paths") or [])]
         bm = f"{w['backend']}/{w.get('model') or 'default'}"[:25]
+        bead = (w.get("bead_id") or "-")[:8]
         print(
-            f"{w['name']:<13} {(w.get('role') or '-'):<6} {bm:<26} {w['status']:<12} "
+            f"{w['name']:<13} {(w.get('role') or '-'):<6} {bead:<9} {bm:<26} {w['status']:<12} "
             f"{w.get('turns', 0):<2} {len(files):<5} {len(viol):<4} {w['branch']}"
         )
 
@@ -926,14 +1057,15 @@ def cmd_report(args: argparse.Namespace) -> None:
         sens = chk["sensitive_changes"] if chk else [f for f in files if Path(f).name in SENSITIVE_FILES]
         verify_ok = chk["verify_ok"] if chk else None
         rev = w.get("last_review") or {}
-        rev_reject = rev.get("verdict") == "REJECT"
+        rev_verdict = rev.get("verdict")
+        rev_bad = rev_verdict in ("REJECT", "UNKNOWN")
 
         is_exc = (
             w["status"] in ("FAILED", "RATE_LIMITED")
             or bool(viol)
             or bool(sens)
             or (verify_ok is False)
-            or rev_reject
+            or rev_bad
         )
         entry = (w, files, viol, sens, verify_ok, rev)
         (exceptions if is_exc else clean).append(entry)
@@ -942,7 +1074,8 @@ def cmd_report(args: argparse.Namespace) -> None:
         print("## [!] Exceptions Requiring Your Attention")
         for w, files, viol, sens, verify_ok, rev in exceptions:
             bm = f"{w['backend']}/{w.get('model') or 'default'}"
-            print(f"- **{w['name']}** (`{w.get('role', '-')}`, `{bm}`, status=`{w['status']}`, files={len(files)}, branch=`{w['branch']}`)")
+            b_str = f", bead=`{w['bead_id']}`" if w.get("bead_id") else ""
+            print(f"- **{w['name']}** (`{w.get('role', '-')}`, `{bm}`, status=`{w['status']}`, files={len(files)}, branch=`{w['branch']}`{b_str})")
             if w.get("last_error"):
                 print(f"  - Error: {w['last_error']}")
             if viol:
@@ -953,6 +1086,8 @@ def cmd_report(args: argparse.Namespace) -> None:
                 print(f"  - Verify FAILED: `{w.get('verify_cmd')}`")
             if rev.get("verdict") == "REJECT":
                 print(f"  - Heterogeneous review REJECTED by `{rev.get('reviewer')}` (see {rev.get('log')})")
+            elif rev.get("verdict") == "UNKNOWN":
+                print(f"  - Heterogeneous review INCONCLUSIVE/FAILED (`UNKNOWN`, exit={rev.get('exit_code')}) by `{rev.get('reviewer')}` (see {rev.get('log')})")
         print()
     else:
         print("## [OK] No Exceptions Detected\n")
@@ -963,8 +1098,9 @@ def cmd_report(args: argparse.Namespace) -> None:
             bm = f"{w['backend']}/{w.get('model') or 'default'}"
             v_str = "pass" if verify_ok is True else ("n/a" if verify_ok is None else "fail")
             r_str = f", review={rev.get('verdict')}" if rev.get("verdict") else ""
+            b_str = f", bead={w['bead_id']}" if w.get("bead_id") else ""
             first_line = (w.get("last_summary") or "").splitlines()[0][:100] if w.get("last_summary") else "(no summary)"
-            print(f"- **{w['name']}** (`{bm}`, status=`{w['status']}`, files={len(files)}, verify={v_str}{r_str}) — {first_line}")
+            print(f"- **{w['name']}** (`{bm}`, status=`{w['status']}`, files={len(files)}, verify={v_str}{r_str}{b_str}) — {first_line}")
 
 
 def cmd_merge(args: argparse.Namespace) -> None:
@@ -987,12 +1123,22 @@ def cmd_merge(args: argparse.Namespace) -> None:
     if root_status:
         sys.exit("Error: main workspace has uncommitted changes; commit or stash before merging.")
 
-    if args.squash:
-        run_git(["merge", "--squash", w["branch"]], repo_root)
-        print(f"Squash-merged '{w['branch']}' into current branch (staged; run 'git commit' to finalize).")
-    else:
-        run_git(["merge", "--no-ff", w["branch"], "-m", f"merge: agent/{w['name']}"], repo_root)
-        print(f"Merged '{w['branch']}' into current branch.")
+    try:
+        if args.squash:
+            run_git(["merge", "--squash", w["branch"]], repo_root)
+            print(f"Squash-merged '{w['branch']}' into current branch (staged; run 'git commit' to finalize).")
+        else:
+            run_git(["merge", "--no-ff", w["branch"], "-m", f"merge: agent/{w['name']}"], repo_root)
+            print(f"Merged '{w['branch']}' into current branch.")
+    except subprocess.CalledProcessError as e:
+        run_git(["merge", "--abort"], repo_root, check=False)
+        if args.squash:
+            run_git(["reset", "--merge"], repo_root, check=False)
+        detail = ((e.stdout or "") + "\n" + (e.stderr or "")).strip()[-800:]
+        sys.exit(f"Error: merge conflict for '{w['branch']}'; aborted merge to keep main workspace clean.\n{detail}")
+
+    if not args.no_bead_close:
+        sync_bead(repo_root, w.get("bead_id"), "close", f"Merged via aw merge ({w['branch']})")
 
     if args.delete:
         cleanup_worker(repo_root, base, w, force=True)
@@ -1039,6 +1185,8 @@ def main() -> None:
     sp.add_argument("--verify", default=None, help="Verification command to run in worktree")
     sp.add_argument("--bead", default=None, help="Associated Beads (bd) issue ID")
     sp.add_argument("--base", default=None, help="Base branch (default: current HEAD branch)")
+    sp.add_argument("--setup", default=None, help="Bootstrap command to run in new worktree (overrides .aw.json setup_cmd)")
+    sp.add_argument("--no-auto-deps", action="store_true", help="Disable automatic symlink of gitignored node_modules/.venv")
     sp.add_argument("-p", "--prompt", default=None, help="Initial task prompt")
     sp.add_argument("-f", "--prompt-file", default=None, help="Read initial prompt from file")
     sp.set_defaults(func=cmd_spawn)
@@ -1093,6 +1241,7 @@ def main() -> None:
     mg.add_argument("--squash", action="store_true")
     mg.add_argument("--auto-commit", action="store_true")
     mg.add_argument("--delete", action="store_true", help="Clean up worktree/branch after merge")
+    mg.add_argument("--no-bead-close", action="store_true", help="Do not auto-close associated Beads issue on merge")
     mg.set_defaults(func=cmd_merge)
 
     rm = sub.add_parser("rm", help="Remove a worker and clean up its worktree/branch")

@@ -1,6 +1,19 @@
 #!/bin/bash
 set -u
 
+SMOKE=0
+for arg in "$@"; do
+  case "$arg" in
+    --smoke) SMOKE=1 ;;
+    -h|--help)
+      echo "Usage: gt-check [--smoke]"
+      echo "  default : fast local toolchain, CLI login, API-key safety, and proxy check"
+      echo "  --smoke : also run live 1-line connectivity & model check across all 3 pools + review models"
+      exit 0
+      ;;
+  esac
+done
+
 echo "=== Core Toolchain ==="
 for entry in "aw:--help" "go:version" "dolt:version" "bd:version" "gt:--version" "tmux:-V" "git:--version" "node:--version" "pnpm:--version" "tsc:--version"; do
   cmd="${entry%%:*}"
@@ -13,11 +26,9 @@ for entry in "aw:--help" "go:version" "dolt:version" "bd:version" "gt:--version"
 done
 
 echo "=== Coding Agent CLIs & Login State ==="
-check_login() {
-  local name="$1"
-  shift
+check_nonempty_file() {
   for p in "$@"; do
-    if [ -e "$p" ]; then
+    if [ -s "$p" ] || [ -d "$p" ]; then
       echo "logged-in"
       return
     fi
@@ -25,14 +36,36 @@ check_login() {
   echo "not-logged-in"
 }
 
+fail=0
 for cmd in codex agy codebuddy pi claude; do
   if command -v "$cmd" >/dev/null 2>&1; then
     ver="$("$cmd" --version 2>&1 | head -n 1)"
     case "$cmd" in
-      codex)     state="$(check_login codex "$HOME/.codex/auth.json")" ;;
-      agy)       state="$(check_login agy "$HOME/.gemini/antigravity-cli" "$HOME/.gemini/google_accounts.json")" ;;
-      codebuddy) state="$(check_login codebuddy "$HOME/.codebuddy/local_storage" "$HOME/.codebuddy/settings.json")" ;;
-      *)         state="optional" ;;
+      codex)
+        if timeout 5 codex login status >/dev/null 2>&1; then
+          state="logged-in (verified)"
+        else
+          state="not-logged-in"
+          fail=1
+        fi
+        ;;
+      agy)
+        if [ -s "$HOME/.gemini/jetski-standalone-oauth-token" ]; then
+          state="logged-in (oauth-token)"
+        elif [ -s "$HOME/.gemini/google_accounts.json" ]; then
+          state="logged-in (accounts-file)"
+        else
+          state="not-logged-in"
+          fail=1
+        fi
+        ;;
+      codebuddy)
+        state="$(check_nonempty_file "$HOME/.codebuddy/local_storage" "$HOME/.codebuddy/user-state.json")"
+        [ "$state" = "not-logged-in" ] && fail=1
+        ;;
+      *)
+        state="optional"
+        ;;
     esac
     printf "  %-10s: %-26s [%s]\n" "$cmd" "$ver" "$state"
   else
@@ -41,7 +74,6 @@ for cmd in codex agy codebuddy pi claude; do
 done
 
 echo "=== Subscription Safety Check (No API Key Leakage) ==="
-fail=0
 for key in OPENAI_API_KEY ANTHROPIC_API_KEY GEMINI_API_KEY; do
   if [ -n "${!key:-}" ]; then
     echo "  [WARN] $key is set (may override subscription login!)"
@@ -54,5 +86,37 @@ done
 echo "=== Proxy Check ==="
 printf "  http_proxy = %s\n" "${http_proxy:-(unset)}"
 printf "  no_proxy   = %s\n" "${no_proxy:-(unset)}"
+
+if [ "$SMOKE" -eq 1 ]; then
+  echo "=== Live 3-Pool + Review Smoke Check (45s timeout each) ==="
+  SMOKE_DIR="$(mktemp -d)"
+  trap 'rm -rf "$SMOKE_DIR"' EXIT
+
+  run_smoke() {
+    local label="$1"
+    shift
+    local start end elapsed out rc
+    start=$(date +%s)
+    out="$(cd "$SMOKE_DIR" && timeout 45 "$@" 2>&1)"
+    rc=$?
+    end=$(date +%s)
+    elapsed=$((end - start))
+    if [ "$rc" -eq 0 ] && echo "$out" | grep -qi "OK"; then
+      printf "  [PASS] %-30s (%2ds)\n" "$label" "$elapsed"
+    else
+      local snippet
+      snippet="$(echo "$out" | tr '\n' ' ' | sed 's/  */ /g' | cut -c1-120)"
+      printf "  [FAIL] %-30s (%2ds, rc=%d) %s\n" "$label" "$elapsed" "$rc" "$snippet"
+      fail=1
+    fi
+  }
+
+  PROMPT="Do not run any tools or commands. Reply with exactly: OK"
+  run_smoke "codex/gpt-6.2-sol (core)" codex exec --skip-git-repo-check --sandbox read-only -m gpt-6.2-sol "$PROMPT"
+  run_smoke "codex/codex-auto-review (rev)" codex exec --skip-git-repo-check --sandbox read-only -m codex-auto-review "$PROMPT"
+  run_smoke "agy/gemini-4-neon-medium (ui)" agy -p "$PROMPT" --mode plan --output-format text --model gemini-4-neon-medium
+  run_smoke "agy/gemini-3.8-flash-high (test)" agy -p "$PROMPT" --mode plan --output-format text --model gemini-3.8-flash-high
+  run_smoke "codebuddy/glm-5.3 (crud)" env CODEBUDDY_IS_SANDBOX=1 codebuddy -p --permission-mode plan --output-format text --model glm-5.3 "$PROMPT"
+fi
 
 exit "$fail"

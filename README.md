@@ -73,6 +73,9 @@ WORKSPACE_HOST_DIR=/path/to/your/workspace podman-compose --in-pod=0 up --build 
 
 ```bash
 podman exec -it agent-container-0.2.0-gastown bash -lc "gt-check"
+
+# 如需实测三家模型池 + 双审查模型实时连通性：
+podman exec -it agent-container-0.2.0-gastown bash -lc "gt-check --smoke"
 ```
 
 `gt-check` 会检查所有核心工具链、各 Agent CLI 版本，并确认 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` 均未设置（避免意外走按量付费 API 覆盖订阅登录态）。
@@ -167,6 +170,18 @@ aw merge core-impl --auto-commit --delete
 
 # 11. 放弃并清理某个 Worker
 aw rm core-impl --force
+```
+
+### Worktree 依赖与 `.env` 自动初始化（`.aw.json`）
+
+`aw spawn` 默认会自动将主仓库中被 `.gitignore` 忽略的 `node_modules` / `.venv` / `venv` 软链进新 worktree（零重复安装开销）。对于 Monorepo、Prisma 或需要拷贝 `.env.local` 的全栈项目，可在仓库根目录放一份 `.aw.json`（或直接传 `--setup "<cmd>"`）：
+
+```json
+{
+  "setup_cmd": "pnpm install --offline",
+  "copy_files": [".env.local"],
+  "auto_symlink_deps": false
+}
 ```
 
 ### 未来升级到大并发（8~20 个 Agent）

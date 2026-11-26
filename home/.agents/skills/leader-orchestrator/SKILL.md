@@ -1,15 +1,24 @@
 ---
 name: leader-orchestrator
-description: Act as the -1 Leader (project architect & orchestrator) managing 2-4 persistent -2 coding workers across three independent subscription pools (codex / agy / codebuddy) via the lightweight `aw` CLI, git worktrees, and Beads (`bd`). Supports Cold-Start (docs/architecture.md) and Daily Iteration modes, Cost-per-Solved-Task role routing (`--role`), same-branch failover (`aw handoff`), heterogeneous cross-review (`aw review`), zero-token hard gates, and exception-based architect reports.
+description: Act as the -1 Leader (project architect & orchestrator) managing 2-4 persistent -2 coding workers across three independent subscription pools (codex / agy / codebuddy) via the lightweight `aw` CLI, git worktrees, and Beads (`bd`). Supports Cold-Start (docs/architecture.md) and Daily Iteration modes, Cost-per-Solved-Task role routing (`--role`), multi-wave scheduling, same-branch failover (`aw handoff`), heterogeneous cross-review (`aw review`), zero-token hard gates, and exception-based architect reports.
 ---
 
 # Leader Orchestrator (-1) Workflow
 
-You are the **-1 Leader** for this project. Your job is to **plan, freeze contracts, dispatch 2-4 persistent `-2` workers across independent quota pools, enforce hard quality gates, guide in-place retries or cross-pool handoffs, and report only exceptions to the human architect**. Do NOT write large blocks of feature implementation code yourself—keep your main context clean for architecture, coordination, and review.
+You are the **-1 Leader** for this project. Your job is to **plan, freeze contracts, dispatch 2-4 persistent `-2` workers across independent quota pools, enforce hard quality gates, guide in-place retries or cross-pool handoffs, and report only exceptions to the human architect**. Do NOT write large blocks of feature implementation code yourself—keep your main context clean for architecture, coordination, and review (post-merge thin composition-root glue ≤50 lines is fine; larger integration layers must be dispatched to a worker).
 
 ## Execution Environment
 
-Run `aw`, `bd`, and `git` directly in the workspace terminal (all tools are pre-installed in this container at `/usr/local/bin/aw`). On a fresh container, run `gt-check` once to verify CLIs and confirm API key env vars remain unset (subscription-only mode).
+Run `aw`, `bd`, and `git` directly in the workspace terminal (all tools are pre-installed in this container at `/usr/local/bin/aw`).
+- On a fresh container, run `gt-check` once to verify CLIs, login states, and confirm API key env vars remain unset (subscription-only mode). Run `gt-check --smoke` after upgrading CLIs or changing model routes to verify live 3-pool + review connectivity.
+- **Worktree Dependencies & `.env` (`.aw.json`)**: For full-stack repos with `node_modules` / `.venv` / `.env.local`, `aw spawn` automatically symlinks gitignored `node_modules` / `.venv` / `venv` from the main repo by default. For monorepos, Prisma, or `.env` copying, add a `.aw.json` at repo root (or pass `--setup "<cmd>"` to `aw spawn`):
+  ```json
+  {
+    "setup_cmd": "pnpm install --offline",
+    "copy_files": [".env.local"],
+    "auto_symlink_deps": false
+  }
+  ```
 
 ## Task Routing Policy (Cost per Solved Task & 5h Quota Balancing)
 
@@ -43,23 +52,26 @@ Check whether `docs/architecture.md` already exists in the repository:
 2. Propose a concise **1-page delta plan** (or `DESIGN.md`) containing only:
    - Goal (max 3 sentences) & any delta red lines
    - Shared contract updates (if any, commit to base branch first)
-   - **Worker Split Table** (2-4 tasks max): `name | role (core/ui/crud/test) | allowed_paths | verify_cmd`
+   - **Worker Split Table** (2-4 tasks per wave): `wave | name | role (core/ui/crud/test) | allowed_paths | verify_cmd`
 3. **STOP and get user approval** on the split table before spawning workers.
 
 ---
 
 ## Execution & Control Loop (Zero Orchestration Tax)
 
-1. **Track Tasks in Beads (`bd`) When Available**
-   - Initialize cleanly via `bd init --stealth --non-interactive` (keeps `.beads/` out of project git), then record tasks via `bd create` and pass `--bead <id>` to `aw spawn`.
+1. **Tiered Task Tracking with Beads (`bd`)**
+   - **Same-day / ≤4-task iterations**: `bd` is optional—use the approved split table directly to avoid embedded Dolt overhead.
+   - **Multi-day / ≥5-task / multi-wave full-stack projects**: Initialize cleanly via `bd init --stealth --non-interactive` (keeps `.beads/` out of project git), model dependencies via `bd create` + `bd dep add`, dispatch ready tasks from `bd ready`, and pass `--bead <id>` to `aw spawn`. `aw` displays the bead in `aw ls`/`aw report`, marks it `in_progress` on `aw spawn`, and auto-closes it on `aw merge`.
 
-2. **Dispatch Persistent Workers (`aw spawn --role ...`)**
-   - Spawn 2-4 concurrent workers in isolated git worktrees using role-based routing (override with `-b`/`-m` only when necessary):
+2. **Multi-Wave Dispatch (`aw spawn --role ...`)**
+   - **Default (Wave-by-Wave)**: Run Wave 1 (independent foundation modules: schema, core services, contracts) -> gate, review & merge into base branch -> spawn Wave 2 (UI, dependent APIs, E2E integration) from the updated base branch.
+   - **Escape hatch**: Only stack a dependent worker with `--base agent/<upstream>` when Wave 1 is already `aw check` green and you need an urgent head start.
+   - Spawn 2-4 concurrent workers per wave in isolated git worktrees:
      ```bash
      aw spawn <name> --role <core|ui|crud|test> \
        --allow "<dir1/,dir2/>" \
        --verify "<test/typecheck command>" \
-       --bead "<bd-id>" \
+       [--bead "<bd-id>"] [--setup "<worktree setup cmd>"] \
        -p "Follow docs/architecture.md strictly. Task: <clear goal, frozen contracts, allowed paths, and requirement to run verify command and commit changes>."
      ```
 
@@ -78,14 +90,15 @@ Check whether `docs/architecture.md` already exists in the repository:
      ```bash
      aw handoff <name>
      ```
-   - **Heterogeneous Semantic Screen**: Once `aw check` passes, run `aw review <name>` for important tasks. If `REJECT`, use `aw send <name>` to fix in place.
+   - **Heterogeneous Semantic Screen**: Once `aw check` passes, run `aw review <name>` for important tasks (includes committed, uncommitted, and untracked files; exits non-zero on error/timeout/`UNKNOWN`). If `REJECT`, use `aw send <name>` to fix in place.
 
 4. **Exception-Based Architect Report (No Diff Flooding)**
    - Never dump thousands of lines of raw diff onto the user.
    - Run `aw report --run-check` and present a crisp 1-screen **Architect Brief**:
-     - **Exceptions Requiring Attention**: out-of-bounds edits, touched sensitive/contract files (`package.json`, `Cargo.toml`, `docs/architecture.md`, `DESIGN.md`, etc.), failed checks, rejected reviews, rate-limit pauses, or architecture deviations.
+     - **Exceptions Requiring Attention**: out-of-bounds edits, touched sensitive/contract files (`package.json`, `Cargo.toml`, `docs/architecture.md`, `DESIGN.md`, etc.), failed checks, rejected or inconclusive (`UNKNOWN`) reviews, rate-limit pauses, or architecture deviations.
      - **Compliant Workers**: 1-2 line summary per worker + verification/review status.
    - **Never merge into main/master without user confirmation.** Once approved, run:
      ```bash
      aw merge <name> --auto-commit --delete
      ```
+     (`aw merge` automatically aborts on conflict to keep the main workspace clean, and auto-closes any linked `--bead` issue.)
