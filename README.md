@@ -108,10 +108,10 @@ codebuddy
 
 | 任务角色 (`--role`) | 默认主力 (`backend / model`) | 适用场景 | 限频/卡死一键接力链 (`aw handoff`) |
 | --- | --- | --- | --- |
-| `core` | `codex` / `gpt-6.2-sol` | 核心业务、强类型后端/算法、疑难 Debug | `agy/claude-sonnet-5-5-medium` → `agy/claude-opus-5-5-medium` → `codebuddy/deepseek-v4-pro` |
-| `ui` | `agy` / `gemini-4-neon-medium` | 前端交互、跨多文件大上下文整合、文档 | `agy/claude-sonnet-5-5-medium` → `codebuddy/kimi-k3.1-pro` |
-| `crud` | `codebuddy` / `glm-5.3` (自动降级 `kimi-k3.1-pro`) | 常规接口/表单/体力活（帮 Codex & AGY 省 5h 额度） | `codebuddy/kimi-k3.1-pro` → `agy/gemini-3.8-flash-high` |
-| `test` | `agy` / `gemini-3.8-flash-high` | 单元测试、边界用例、辅助脚本（极速低耗） | `codebuddy/glm-5.3` → `codex/gpt-6-luna` |
+| `core` | `codex` / `gpt-6.2-sol` | 核心业务、并发锁/资金安全/强类型后端、复杂有状态模块 | `agy/claude-sonnet-5-5-medium` → `agy/claude-opus-5-5-medium` → `codebuddy/deepseek-v4.1-flash` |
+| `ui` | `agy` / `gemini-4-neon-medium` | 前端交互、跨多文件路由/网关整合、大上下文文档 | `agy/claude-sonnet-5-5-medium` → `codebuddy/deepseek-v4.1-flash` → `codebuddy/kimi-k3.1-pro` |
+| `crud` | `codebuddy` / `deepseek-v4.1-flash` (自动降级 `kimi-k3.1-pro`) | 常规接口/CLI/表单/薄适配器（帮 Codex & AGY 省 5h 额度） | `codebuddy/kimi-k3.1-pro` → `agy/gemini-3.8-flash-high` |
+| `test` | `agy` / `gemini-3.8-flash-high` | 单元测试、边界用例、辅助脚本（极速低耗） | `codebuddy/deepseek-v4.1-flash` → `codex/gpt-6-luna` |
 
 - **异构交叉初筛（`aw review <name>`）**：绝不自己审自己——`codex` 写的代码由 `agy/gemini-3.8-flash-high` 初筛；`agy` / `codebuddy` 写的代码由 `codex/codex-auto-review` 初筛。
 
@@ -131,8 +131,9 @@ codebuddy
 ### 轻量编排工具 `aw` 常用命令速查
 
 ```bash
-# 0. 查看当前生效的角色路由表与接力链
-aw routes
+# 0. 查看角色路由表（加 -H 懒加载健康徽章）& Wave 1 前并发探针校验
+aw routes --health
+aw probe core ui crud
 
 # 1. 按角色自动路由创建独立 git worktree 并后台拉起持久化 Worker
 aw spawn core-impl --role core \
@@ -156,8 +157,10 @@ aw check core-impl
 # 6. 原地续聊纠偏（保留完整会话上下文，不重建）
 aw send core-impl "测试报错 xxx，请只在 src/core/ 内修复后重跑验证。"
 
-# 7. 撞 5 小时限频或同模型卡死时，同分支一键交接给备选池下一模型
-aw handoff core-impl
+# 7. 优雅停止卡死 Worker / 同模型清上下文重置 / 跨池无缝接力
+aw stop core-impl
+aw handoff core-impl --same-model     # 同模型清空长历史原地重生
+aw handoff core-impl [--force]        # 撞限频或卡死时同分支切到备选池下一模型
 
 # 8. 触发异构只读代码初筛（对照 docs/architecture.md 查 diff）
 aw review core-impl

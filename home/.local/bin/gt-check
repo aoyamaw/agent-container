@@ -116,7 +116,7 @@ if [ "$SMOKE" -eq 1 ]; then
   run_smoke "codex/codex-auto-review (rev)" codex exec --skip-git-repo-check --sandbox read-only -m codex-auto-review "$PROMPT"
   run_smoke "agy/gemini-4-neon-medium (ui)" agy -p "$PROMPT" --mode plan --output-format text --model gemini-4-neon-medium
   run_smoke "agy/gemini-3.8-flash-high (test)" agy -p "$PROMPT" --mode plan --output-format text --model gemini-3.8-flash-high
-  run_smoke "codebuddy/glm-5.3 (crud)" env CODEBUDDY_IS_SANDBOX=1 codebuddy -p --permission-mode plan --output-format text --model glm-5.3 "$PROMPT"
+  run_smoke "codebuddy/deepseek-v4.1-flash (crud)" env CODEBUDDY_IS_SANDBOX=1 codebuddy -p --permission-mode plan --output-format text --model deepseek-v4.1-flash "$PROMPT"
 fi
 
 exit "$fail"
