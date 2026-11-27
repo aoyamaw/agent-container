@@ -413,13 +413,15 @@ def ensure_worker_hooks(base: Path) -> Path:
     pre_commit = hooks_dir / "pre-commit"
     script = """#!/usr/bin/env bash
 set -euo pipefail
-if [ -n "${AW_WORKTREE:-}" ]; then
+if [ -n "${AW_WORKTREE:-}" ] && [ -n "${AW_REPO_ROOT:-}" ]; then
   current_top="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
   real_top="$(realpath "$current_top" 2>/dev/null || echo "$current_top")"
   real_wt="$(realpath "$AW_WORKTREE" 2>/dev/null || echo "$AW_WORKTREE")"
-  if [ "$real_top" != "$real_wt" ]; then
-    echo "ERROR [aw]: Worker '${AW_WORKER_NAME:-unknown}' is forbidden from committing outside its worktree." >&2
-    echo "  Attempted repo : $real_top" >&2
+  real_main="$(realpath "$AW_REPO_ROOT" 2>/dev/null || echo "$AW_REPO_ROOT")"
+  sibling_prefix="$real_main/.agent-workers/worktrees/"
+  if [ "$real_top" = "$real_main" ] || { [[ "$real_top" == "$sibling_prefix"* ]] && [ "$real_top" != "$real_wt" ]; }; then
+    echo "ERROR [aw]: Worker '${AW_WORKER_NAME:-unknown}' is forbidden from committing outside its assigned worktree." >&2
+    echo "  Attempted repo   : $real_top" >&2
     echo "  Assigned worktree: $real_wt" >&2
     exit 1
   fi
@@ -667,17 +669,24 @@ def wrap_worker_prompt(w: dict, repo_root: Path, prompt: str) -> str:
 
 def extract_session_and_summary(backend: str, log_path: Path, last_msg_path: Path) -> tuple[str | None, str, bool]:
     text = log_path.read_text(encoding="utf-8", errors="ignore") if log_path.exists() else ""
-    rate_limited = bool(RATE_LIMIT_RE.search(text))
+    rate_limited = False
     found_sid = None
     last_text = ""
 
     for line in text.splitlines():
         line_s = line.strip()
+        if not line_s or line_s.startswith("#"):
+            continue
         if not line_s.startswith("{"):
+            # Raw CLI stderr / non-JSON lines are legitimate places for API rate-limit errors.
+            if RATE_LIMIT_RE.search(line_s):
+                rate_limited = True
             continue
         try:
             obj = json.loads(line_s)
         except json.JSONDecodeError:
+            if RATE_LIMIT_RE.search(line_s):
+                rate_limited = True
             continue
 
         if backend in ("codex", "agy", "codebuddy") and not found_sid:
@@ -695,26 +704,44 @@ def extract_session_and_summary(backend: str, log_path: Path, last_msg_path: Pat
                         found_sid = obj["result"][k]
                         break
 
+        # Skip user/tool_result payloads when scanning for rate-limit errors or assistant summaries
+        # so source code containing '429' or 'RATE_LIMITED' never falsely triggers cooldown.
+        ev_type = str(obj.get("type") or "").lower()
+        msg_role = str((obj.get("message") or {}).get("role") or "").lower() if isinstance(obj.get("message"), dict) else ""
+        if ev_type in ("user", "tool_result", "tool_use") or msg_role == "user":
+            continue
+
+        err_val = obj.get("error")
+        if err_val and RATE_LIMIT_RE.search(json.dumps(err_val, ensure_ascii=False)):
+            rate_limited = True
+        if obj.get("is_error") and RATE_LIMIT_RE.search(json.dumps(obj.get("result") or obj.get("message") or "", ensure_ascii=False)):
+            rate_limited = True
+
+        extracted = ""
         for key in ("result", "text", "content", "message"):
             val = obj.get(key)
             if isinstance(val, str) and val.strip():
-                last_text = val.strip()
+                extracted = val.strip()
             elif isinstance(val, dict):
                 for subk in ("content", "response", "text"):
                     c = val.get(subk)
                     if isinstance(c, str) and c.strip():
-                        last_text = c.strip()
+                        extracted = c.strip()
                         break
                     elif isinstance(c, list):
                         chunks = [
                             item.get("text", "")
                             for item in c
-                            if isinstance(item, dict) and isinstance(item.get("text"), str)
+                            if isinstance(item, dict) and item.get("type") != "tool_result" and isinstance(item.get("text"), str)
                         ]
                         joined = "".join(chunks).strip()
                         if joined:
-                            last_text = joined
+                            extracted = joined
                             break
+        if extracted:
+            last_text = extracted
+            if ev_type in ("error", "result") and RATE_LIMIT_RE.search(extracted):
+                rate_limited = True
 
     if last_msg_path.exists():
         raw = last_msg_path.read_text(encoding="utf-8", errors="ignore").strip()
@@ -768,6 +795,8 @@ def cmd_internal_run(args: argparse.Namespace) -> None:
     w["turns"] = turn
     w["last_log"] = str(log_path)
     w["last_error"] = None
+    w["last_check"] = None
+    w["last_review"] = None
     save_worker(base, w)
 
     timed_out = False
@@ -1370,6 +1399,8 @@ def cmd_send(args: argparse.Namespace) -> None:
     w["status"] = "RUNNING"
     w["pid"] = pid
     w["turns"] = next_turn
+    w["last_check"] = None
+    w["last_review"] = None
     save_worker(base, w)
     print(f"Sent turn {next_turn} to '{w['name']}' ({w['backend']}/{w.get('model') or 'default'}, resume={is_resume}, pid={pid})")
 
@@ -1476,6 +1507,8 @@ def cmd_handoff(args: argparse.Namespace) -> None:
         tried.append({"backend": new_backend, "model": new_model})
     w["tried"] = tried
     w["last_error"] = None
+    w["last_check"] = None
+    w["last_review"] = None
 
     if args.dry_run:
         w["status"] = "IDLE"
@@ -1491,6 +1524,8 @@ def cmd_handoff(args: argparse.Namespace) -> None:
     w["status"] = "RUNNING"
     w["pid"] = pid
     w["turns"] = next_turn
+    w["last_check"] = None
+    w["last_review"] = None
     save_worker(base, w)
     if same_model:
         print(f"Reset '{w['name']}' to fresh context on {old_label} (same worktree & branch, turn={next_turn}, pid={pid})")
@@ -1570,10 +1605,15 @@ def cmd_review(args: argparse.Namespace) -> None:
         else f"[COMPLETE DIFF: {len(combined_diff)} chars]"
     )
 
+    readonly_rule = (
+        "Do NOT edit any files and do NOT run shell commands; if the inline diff is marked [TRUNCATED], use built-in read-only file tools only.\n"
+        if rev_backend == "agy"
+        else "Do NOT edit any files or run mutating commands. If the inline diff is marked [TRUNCATED], you may use read-only inspection inside this worktree to read omitted lines before deciding.\n"
+    )
     review_prompt = (
         "You are an independent read-only code reviewer screening changes for a human architect.\n"
-        "Do NOT edit any files and do NOT run shell commands (use read-only file-reading tools only if the inline diff is truncated).\n"
-        "Scope & Contract Rules:\n"
+        + readonly_rule
+        + "Scope & Contract Rules:\n"
         f"- This worker is STRICTLY restricted to allowed_paths: {allowed_str}\n"
         "- Do NOT reject the worker for architectural improvements that require editing frozen contracts or files outside allowed_paths; list those as Non-Blocking Notes instead.\n"
         f"- {truncation_note}\n"
@@ -1782,7 +1822,8 @@ def run_check_for_worker(repo_root: Path, base: Path, w: dict) -> dict:
             partial = ((e.stdout or "") if isinstance(e.stdout, str) else "") + "\n" + ((e.stderr or "") if isinstance(e.stderr, str) else "")
             verify_output = (partial.strip()[-1000:] + f"\n[aw] verify_cmd timed out after {verify_timeout}s").strip()
 
-    passed = (len(violations) == 0) and (verify_ok is not False)
+    head_drift = any("main HEAD moved" in m for m in main_warnings)
+    passed = (len(violations) == 0) and (verify_ok is not False) and (not head_drift)
     result = {
         "checked_at": now_iso(),
         "passed": passed,
