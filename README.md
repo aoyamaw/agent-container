@@ -115,7 +115,7 @@ codebuddy
 
 - **异构交叉初筛（`aw review <name>`）**：绝不自己审自己——`codex` 写的代码由 `agy/gemini-3.8-flash-high` 初筛；`agy` / `codebuddy` 写的代码由 `codex/codex-auto-review` 初筛。
 
-### 双模式设计（已内置为 `leader-orchestrator` Skill）
+### 双模式设计（已内置为 `leader-orchestrator` Skill，人类可读中文版见 [README.zh-CN.md](home/.agents/skills/leader-orchestrator/README.zh-CN.md)）
 
 1. **冷启动 / 大型重构（完整打磨模式）**
    - 用反重力（`-1`）Remote-SSH 连进容器（`agent@<服务器IP>:6666`），打开 `/home/agent/workspace/<项目>`。
@@ -240,5 +240,7 @@ gt up
     ├── set-proxy.sh / unset-proxy.sh               # 代理开关脚本
     ├── .local/bin/w                                # 零依赖持久化 Worker 编排 CLI（软链为 /usr/local/bin/aw）
     ├── .local/share/templates/DESIGN.md            # 增量任务切分模板
-    └── .agents/skills/leader-orchestrator/SKILL.md # 反重力 -1 Leader 工作流 Skill
+    └── .agents/skills/leader-orchestrator/
+        ├── SKILL.md                                # 反重力 -1 Leader 工作流 Skill（英文，供 Agent 加载）
+        └── README.zh-CN.md                         # Leader 工作流中文完整指南（供人阅读）
 ```
